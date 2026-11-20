@@ -152,24 +152,33 @@ public class LogServidor {
      * @param status          status da operação em maiúsculas;
      * @param detalhes        detalhe livre da operação.
      */
-    void registrar(String enderecoCliente, String operacao,
-                   String status, String detalhes) {
+    void registrar (String enderecoCliente, String operacao, String status, String detalhes) {
+
         String linha = montarLinha(enderecoCliente, operacao, status, detalhes);
 
         // A gravação é sincronizada para evitar que duas threads do servidor
         // escrevam no mesmo arquivo ao mesmo tempo e misturem as linhas.
+
         synchronized (travaEscrita) {
-            try (PrintWriter escritor = new PrintWriter(new BufferedWriter(
-                    new FileWriter(arquivoLog, StandardCharsets.UTF_8, true)))) {
+
+            try (PrintWriter escritor = new PrintWriter(new BufferedWriter(new FileWriter(arquivoLog, StandardCharsets.UTF_8, true)))) {
+
                 escritor.println(linha);
+
                 // PrintWriter faz flush implícito a cada println, mas o flush
+
                 // explícito garante a descarga imediata no disco.
+
                 escritor.flush();
-            } catch (IOException excecao) {
+            }
+
+            catch (IOException excecao) {
+
                 // Falha ao gravar o log não pode derrubar o servidor.
+
                 // A mensagem é exibida no console para diagnóstico.
-                System.err.println("[LogServidor] Falha ao gravar no arquivo de log: "
-                        + excecao.getMessage());
+
+                System.err.println("[LogServidor] Falha ao gravar no arquivo de log: " + excecao.getMessage());
             }
         }
     }

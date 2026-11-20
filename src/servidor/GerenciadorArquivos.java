@@ -13,9 +13,7 @@ import java.util.stream.Stream;
 
 /**
  * GerenciadorArquivos
- *
  * Centraliza o acesso à pasta de armazenamento do servidor de arquivos UDP.
- *
  * Política de armazenamento (retirada da instrução do projeto):
  *  - Pasta central única: "central/" na raiz do projeto, criada sob demanda.
  *  - Qualquer extensão é aceita (.txt, .pdf, .jpg, .png, .docx etc.).
@@ -23,7 +21,6 @@ import java.util.stream.Stream;
  *    numérico antes da extensão (ex.: relatorio.pdf -> relatorio_1.pdf).
  *  - Caminhos enviados pelo cliente são descartados: somente o nome final do
  *    arquivo é utilizado, impedindo gravação fora da pasta central.
- *
  * Esta classe usa apenas o JDK (java.nio.file), sem dependências externas.
  */
 public class GerenciadorArquivos {
@@ -94,9 +91,7 @@ public class GerenciadorArquivos {
 
         if (nome == null || nome.isBlank()) return false;
 
-        try {
-            return Files.isRegularFile(resolverCaminhoSeguro(nome));
-        }
+        try { return Files.isRegularFile(resolverCaminhoSeguro(nome)); }
 
         catch (IllegalArgumentException | SecurityException e) {
 
@@ -107,9 +102,7 @@ public class GerenciadorArquivos {
 
 
     /**
-     * Salva um arquivo recebido de um cliente na pasta central,
-     * garantindo um nome único no disco.
-     *
+     * Salva um arquivo recebido de um cliente na pasta central, garantindo um nome único no disco.
      * Regras aplicadas:
      *  - Apenas o nome final do arquivo é usado; qualquer caminho do cliente é descartado.
      *  - Se o nome já existir, é gerado um sufixo numérico antes da extensão
@@ -124,7 +117,7 @@ public class GerenciadorArquivos {
      * @throws IllegalArgumentException se o nome ou os dados forem inválidos.
      * @throws IOException              se a gravação falhar.
      */
-    public synchronized String salvarArquivo(String nome, byte[] dados) throws IOException {
+    public synchronized String salvarArquivo (String nome, byte[] dados) throws IOException {
 
         if (dados == null) throw new IllegalArgumentException("Bytes do arquivo são nulos.");
 
@@ -134,9 +127,7 @@ public class GerenciadorArquivos {
 
         Path caminho = resolverCaminhoSeguro(nomeFinal);
 
-        // CREATE_NEW: se, por corrida, o arquivo já existir, lança exceção em vez
-
-        // de sobrescrever o conteúdo já armazenado.
+        // CREATE_NEW: se, por corrida, o arquivo já existir, lança exceção em vez de sobrescrever o conteúdo já armazenado.
 
         Files.write(caminho, dados, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
 
@@ -154,7 +145,7 @@ public class GerenciadorArquivos {
      * @throws FileNotFoundException se o arquivo não existir ou não for um arquivo regular.
      * @throws IOException           se houver erro de acesso.
      */
-    public Path abrirParaBaixar(String nome) throws IOException {
+    public Path abrirParaBaixar (String nome) throws IOException {
 
         Path caminho = resolverCaminhoSeguro(nome);
 
@@ -185,7 +176,7 @@ public class GerenciadorArquivos {
      * Nome livre -> devolvido sem alteração; nome ocupado -> sufixo numérico
      * antes da extensão, incrementando até encontrar um vago.
      */
-    private String gerarNomeUnico(String nomeBase) {
+    private String gerarNomeUnico (String nomeBase) {
 
         if (!Files.exists(resolverCaminhoSeguro(nomeBase))) return nomeBase;
 
@@ -252,7 +243,7 @@ public class GerenciadorArquivos {
      * Resolve um nome dentro da pasta central e garante que o caminho final
      * permaneça DENTRO dela (proteção contra path traversal).
      */
-    private Path resolverCaminhoSeguro(String nome) {
+    private Path resolverCaminhoSeguro (String nome) {
 
         String nomeLimpo = extrairNomeArquivo(nome);
 
@@ -261,5 +252,12 @@ public class GerenciadorArquivos {
         if (!caminho.startsWith(PASTA_CENTRAL_CAMINHO)) throw new SecurityException("Tentativa de acessar caminho fora da pasta central: " + nome);
 
         return caminho;
+    }
+
+
+
+    public boolean existe (String nome) {
+
+        return false;
     }
 }

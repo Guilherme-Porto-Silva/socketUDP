@@ -1,4 +1,4 @@
-package cliente;
+package cliente.componentes;
 
 /**
  * Direção da transferência.

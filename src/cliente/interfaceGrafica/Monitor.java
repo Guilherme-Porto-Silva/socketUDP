@@ -1,4 +1,4 @@
-package cliente;
+package cliente.interfaceGrafica;
 
 /**
  * Canal de comunicação com a interface. Todos os métodos são chamados

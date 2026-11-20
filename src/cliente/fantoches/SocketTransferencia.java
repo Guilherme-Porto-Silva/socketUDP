@@ -1,7 +1,7 @@
-package cliente;
+package cliente.fantoches;
 
+import cliente.UDP.RespostaUDP;
 import comum.Datagrama;
-
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
@@ -11,15 +11,13 @@ import java.util.Arrays;
 
 /**
  * Socket UDP dedicado às transferências de arquivo (subir/baixar).
- *
  * Ele é independente do FANTOCHE principal do cliente, usado pela thread de
  * escuta de UPDATE_LIST. Assim, a thread de transferência pode enviar e
  * receber ACKs sem disputar datagramas com a escuta.
- *
  * Reutiliza a classe {@link RespostaUDP} para manter o mesmo
  * contrato de resposta (timeout/dados) usado pelo restante do cliente.
  */
-public final class SocketTransferencia implements AutoCloseable {
+public final class SocketTransferencia extends DatagramSocket implements AutoCloseable {
 
     /** Tamanho máximo de um datagrama UDP (payload IP - cabeçalhos UDP/IP). */
     private static final int BUFFER_TAMANHO = 65507;
@@ -86,23 +84,7 @@ public final class SocketTransferencia implements AutoCloseable {
             return RespostaUDP.esgotar();
         }
 
-        byte[] dados = Arrays.copyOf(pacote.getData(), pacote.getLength());
-        
-        Datagrama datagrama;
-        
-        try {
-            datagrama = Datagrama.parse(dados);
-        }
-        
-        catch (Exception e) {
-        
-            throw new IOException("Falha ao interpretar datagrama recebido.", e);
-        }
-
-
-        InetSocketAddress origem = (InetSocketAddress) pacote.getSocketAddress();
-
-        return RespostaUDP.dados(datagrama, origem);
+        return getRespostaUDP(pacote);
     }
 
     

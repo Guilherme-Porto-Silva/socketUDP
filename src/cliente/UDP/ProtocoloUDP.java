@@ -1,4 +1,4 @@
-package cliente;
+package cliente.UDP;
 
 import comum.Datagrama;
 import java.io.IOException;
@@ -11,14 +11,12 @@ import java.util.Arrays;
 
 /**
  * ProtocoloUDP encapsula o envio e a recepção de datagramas no lado do cliente.
- * 
  * Responsabilidades:
  * - Configurar e manter um DatagramSocket para o cliente;
  * - Enviar datagramas para o servidor;
  * - Receber respostas respeitando um timeout máximo;
  * - Devolver um indicador de timeout quando o servidor não responde,
  *   para que a interface e as threads de transferência tratem a indisponibilidade.
- * 
  * Esta classe NÃO monta nem interpreta os campos do protocolo: a serialização e o
  * parse são delegados aos métodos de Datagrama (contrato comum em src/comum).
  */
@@ -50,22 +48,27 @@ public class ProtocoloUDP {
         
         MEIA = meia;
     }
-    
-    
+
+
+
+    public ProtocoloUDP (String enderecoDoServidor, int portaDoServidor) throws IOException {
+
+        MEIA = new DatagramSocket(new InetSocketAddress(enderecoDoServidor, portaDoServidor));
+    }
+
 
     /**
      * Encerra o fantoche e libera os recursos de rede.
      */
     public void fechar () {
         
-        if (MEIA != null && !MEIA.isClosed()) MEIA.close();
+        if (!MEIA.isClosed()) MEIA.close();
     }
 
     
     
     /**
      * Envia um datagrama para o destino informado.
-     * 
      * A serialização do datagrama é delegada a Datagrama.serializar().
      */
     public void enviar (Datagrama datagrama, InetSocketAddress destino) throws IOException {
@@ -125,33 +128,36 @@ public class ProtocoloUDP {
             return RespostaUDP.esgotar();
         }
 
+        return getRespostaUDP(pacote);
+    }
+
+
+
+    public static RespostaUDP getRespostaUDP (DatagramPacket pacote) throws IOException {
+
         byte[] dados = Arrays.copyOf(pacote.getData(), pacote.getLength());
-        
+
         Datagrama datagrama;
-        
-        try {
-            datagrama = Datagrama.parse(dados);
-        }
-        
+
+        try { datagrama = Datagrama.parse(dados); }
+
         catch (Exception e) {
-        
+
             throw new IOException("Falha ao interpretar datagrama recebido.", e);
         }
-        
+
         InetSocketAddress origem = (InetSocketAddress) pacote.getSocketAddress();
-        
+
         return RespostaUDP.dados(datagrama, origem);
     }
-    
-    
+
 
     /**
      * Envia um datagrama e aguarda a resposta dentro do timeout informado.
-     * 
      * É o fluxo principal para comandos do cliente que esperam ACK,
      * ERROR, lista ou metadados do servidor.
      */
-    public RespostaUDP enviarEReceber(Datagrama datagrama, InetSocketAddress destino, int timeoutMs) throws IOException {
+    public RespostaUDP enviarReceber (Datagrama datagrama, InetSocketAddress destino, int timeoutMs) throws IOException {
         
         enviar(datagrama, destino);
         
@@ -163,7 +169,7 @@ public class ProtocoloUDP {
     /**
      * Devolve o endereço local (IP e porta efêmera) usado pelo MEIA do cliente.
      */
-    public InetSocketAddress obterEnderecoLocal() {
+    public InetSocketAddress obterEnderecoLocal () {
     
         return (InetSocketAddress) MEIA.getLocalSocketAddress();
     }

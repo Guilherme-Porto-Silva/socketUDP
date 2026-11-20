@@ -1,10 +1,12 @@
-package cliente;
+package cliente.componentes;
 
+import cliente.UDP.ProtocoloUDP;
+import cliente.UDP.RespostaUDP;
+import cliente.fantoches.SocketTransferencia;
+import cliente.interfaceGrafica.Monitor;
 import comum.Comando;
 import comum.Datagrama;
 import comum.Fragmento;
-import servidor.ProtocoloUDP;
-
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -15,7 +17,6 @@ import java.util.logging.Logger;
 
 /**
  * Executa subir e baixar em segundo plano, fora da EDT do Swing.
- *
  * Responsabilidades:
  *  - Fragmentar o arquivo em pedaços de 1024 bytes (MTU-safe);
  *  - Enviar/receber com ACK individual por fragmento;
@@ -23,7 +24,6 @@ import java.util.logging.Logger;
  *  - Descartar fragmentos duplicados e bufferizar os fora de ordem;
  *  - Reportar progresso e resultado à interface exclusivamente via callback,
  *    sem tocar em componentes visuais.
- *
  * A classe NÃO conhece Swing. Toda comunicação com a GUI passa pelo MONITOR.
  * Usa a API do ProtocoloUDP do pacote cliente (RespostaUDP com esgotado/temDados).
  */
@@ -54,8 +54,6 @@ public final class ThreadTransferencia extends Thread {
 
     private final Monitor MONITOR;
 
-    private final ProtocoloUDP PROTOCOLO;
-
     private final InetSocketAddress SERVIDOR;
 
     private final SocketTransferencia MEIA_DE_TRANSFERENCIA;
@@ -85,11 +83,11 @@ public final class ThreadTransferencia extends Thread {
      * @param monitor        callback para a interface gráfica
      */
     public ThreadTransferencia
-    (ProtocoloUDP protocolo, InetSocketAddress servidor, Path caminhoArquivo, String nomeArquivo, Monitor monitor, SocketTransferencia socketTransferencia) {
+    (ProtocoloUDP protocolo, InetSocketAddress servidor, Path caminhoArquivo, String nomeArquivo, Monitor monitor, SocketTransferencia meia) {
 
         super("ThreadTransferencia-UPLOAD");
 
-        this.MEIA_DE_TRANSFERENCIA = socketTransferencia;
+        this.MEIA_DE_TRANSFERENCIA = meia;
 
         if (protocolo == null) throw new IllegalArgumentException("protocolo não pode ser nulo");
 
@@ -103,8 +101,6 @@ public final class ThreadTransferencia extends Thread {
 
         DESCRICAO = Direcao.UPLOAD;
 
-        PROTOCOLO = protocolo;
-
         SERVIDOR = servidor;
 
         CAMINHO_ATE_ARQUIVO = caminhoArquivo;
@@ -115,6 +111,8 @@ public final class ThreadTransferencia extends Thread {
 
         MONITOR = monitor;
     }
+    
+
 
     private static byte[] remontar (byte[][] buffer, long tamanhoEsperado) throws IOException {
     
@@ -165,8 +163,6 @@ public final class ThreadTransferencia extends Thread {
         if (monitor == null) throw new IllegalArgumentException("monitor não pode ser nulo");
 
         DESCRICAO = Direcao.DOWNLOAD;
-
-        PROTOCOLO = protocolo;
 
         SERVIDOR = servidor;
 
@@ -275,7 +271,7 @@ public final class ThreadTransferencia extends Thread {
 
         for (int tentativa = 1; tentativa <= LIMITE_TENTATIVAS; tentativa++) {
 
-            if (tentativa > 1) PROTOCOLO.enviar(comando, SERVIDOR); // reenvia
+            MEIA_DE_TRANSFERENCIA.enviar(comando, SERVIDOR);
 
             RespostaUDP respostaUDP = MEIA_DE_TRANSFERENCIA.receber(TIMEOUT_MS);
 
@@ -317,7 +313,7 @@ public final class ThreadTransferencia extends Thread {
      * 4. Ao completar, remonta o arquivo, confere o hash e salva no destino;
      * 5. Notifica progresso a cada fragmento confirmado.
      */
-    private void baixar() throws IOException, InterruptedException {
+    private void baixar () throws IOException, InterruptedException {
 
 //      Requisição
 
@@ -395,7 +391,7 @@ public final class ThreadTransferencia extends Thread {
 
 //                  Envia ACK individual
 
-                    PROTOCOLO.enviar(Datagrama.ack(meta.idTransferencia(), numFrag), SERVIDOR);
+                    MEIA_DE_TRANSFERENCIA.enviar(Datagrama.ack(meta.idTransferencia(), numFrag), SERVIDOR);
 
 //                  Progresso
 
@@ -435,7 +431,7 @@ public final class ThreadTransferencia extends Thread {
 
         for (int tentativa = 1; tentativa <= LIMITE_TENTATIVAS; tentativa++) {
 
-            if (tentativa > 1) PROTOCOLO.enviar(download, SERVIDOR); // reenvia
+            MEIA_DE_TRANSFERENCIA.enviar(download, SERVIDOR);
 
             RespostaUDP r = MEIA_DE_TRANSFERENCIA.receber(TIMEOUT_MS);
 
@@ -491,7 +487,7 @@ public final class ThreadTransferencia extends Thread {
 
         for (int tentativa = 1; tentativa <= LIMITE_TENTATIVAS; tentativa++) {
 
-            PROTOCOLO.enviar(data, SERVIDOR);
+            MEIA_DE_TRANSFERENCIA.enviar(data, SERVIDOR);
 
             RespostaUDP r = MEIA_DE_TRANSFERENCIA.receber(TIMEOUT_MS);
 

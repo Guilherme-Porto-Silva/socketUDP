@@ -1,8 +1,11 @@
 package cliente;
 
+import cliente.UDP.ProtocoloUDP;
+import cliente.interfaceGrafica.InterfaceGrafica;
 import comum.Comando;
 import comum.Datagrama;
 import javax.swing.SwingUtilities;
+import java.net.InetSocketAddress;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -13,7 +16,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Classe principal do cliente do Servidor de Arquivos via UDP.
- *
  * Responsabilidades:
  * - Abrir a interface gráfica (InterfaceGrafica).
  * - Identificar o cliente com um id único.
@@ -46,7 +48,7 @@ public class Cliente {
     private final InterfaceGrafica INTERFACE;
 
     /** Camada de transporte confiável sobre UDP. */
-    private  ProtocoloUDP PROTOCOLO;
+    private ProtocoloUDP PROTOCOLO;
 
     /** Indica se o cliente ainda está ativo e conectado ao fluxo do servidor. */
     private final AtomicBoolean ATIVO = new AtomicBoolean(false);
@@ -119,7 +121,7 @@ public class Cliente {
      * Aguarda ACK dentro do timeout; se não houver resposta, avisa a interface
      * que o servidor está indisponível. Em caso de sucesso, inicia a escuta e o LIST.
      */
-    private void registrarEmSegundoPlano() {
+    private void registrarEmSegundoPlano () {
 
         Thread threadRegistro = new Thread(() -> {
 
@@ -128,11 +130,11 @@ public class Cliente {
 
                 campos.put("id", ID_CLIENTE);
 
-                Datagrama registro = new Datagrama(Comando.REGISTER, campos);
+                Datagrama registro = Datagrama.registrar(ID_CLIENTE);
 
-                PROTOCOLO.enviar(registro);
+                PROTOCOLO.enviar(registro, new InetSocketAddress(PORTA_DO_SERVIDOR));
 
-                Datagrama resposta = PROTOCOLO.receber(TIMEOUT_REGISTRO_MS);
+                Datagrama resposta = PROTOCOLO.receber(TIMEOUT_REGISTRO_MS).datagrama();
 
                 if (resposta != null && resposta.getComando() == Comando.ACK) {
 
@@ -143,7 +145,7 @@ public class Cliente {
 
                 else if (resposta != null && resposta.getComando() == Comando.ERROR) {
 
-                    String mensagem = resposta.getCampo("mensagem");
+                    String mensagem = resposta.getMensagemErro();
 
                     notificarServidorIndisponivel(
                         "Servidor recusou o registro: "
@@ -194,7 +196,7 @@ public class Cliente {
         while (ATIVO.get()) {
 
             try {
-                Datagrama datagrama = PROTOCOLO.receber(INTERVALO_ESCUTA_MS);
+                Datagrama datagrama = PROTOCOLO.receber(INTERVALO_ESCUTA_MS).datagrama();
 
                 if (datagrama == null) continue;
 
@@ -207,21 +209,22 @@ public class Cliente {
                     sinalizarListaRecebida();
                 }
 
-                else if (datagrama.getComando() == Comando.ACK
-                        && datagrama.getCampo("lista") != null) {
+                else if ( (datagrama.getComando() == Comando.ACK) && (datagrama.getCampo("lista") != null) ) {
+
                     // Alguns servidores respondem ao LIST com ACK contendo a lista.
+
                     List<String> lista = extrairLista(datagrama);
+
                     SwingUtilities.invokeLater(() -> INTERFACE.atualizarLista(lista));
+
                     sinalizarListaRecebida();
                 }
 
                 else if (datagrama.getComando() == Comando.ERROR) {
 
-                    String mensagem = datagrama.getCampo("mensagem");
+                    String mensagem = datagrama.getMensagemErro();
 
-                    SwingUtilities.invokeLater(() -> INTERFACE.exibirMensagem(
-                        "Erro: " + (mensagem == null ? "mensagem desconhecida" : mensagem)
-                    ));
+                    SwingUtilities.invokeLater(() -> INTERFACE.exibirMensagem("Erro: " + (mensagem == null ? "mensagem desconhecida" : mensagem)));
                 }
             }
 
@@ -249,17 +252,13 @@ public class Cliente {
 
                 campos.put("id", ID_CLIENTE);
 
-                Datagrama pedidoLista = new Datagrama(Comando.LIST, campos);
+                Datagrama pedidoLista = Datagrama.listar();
 
-                PROTOCOLO.enviar(pedidoLista);
+                PROTOCOLO.enviar(pedidoLista, new InetSocketAddress(PORTA_DO_SERVIDOR));
 
-                synchronized (LISTA_DE_BLOQUEADOS) {
-                    listaRecebida = false;
-                }
+                synchronized (LISTA_DE_BLOQUEADOS) { listaRecebida = false; }
 
-                synchronized (LISTA_DE_BLOQUEADOS) {
-                    LISTA_DE_BLOQUEADOS.wait(TIMEOUT_LISTA_MS);
-                }
+                synchronized (LISTA_DE_BLOQUEADOS) { LISTA_DE_BLOQUEADOS.wait(TIMEOUT_LISTA_MS); }
 
                 if (!listaRecebida) notificarServidorIndisponivel("Não houve resposta do servidor ao LIST (timeout).");
 
@@ -305,11 +304,9 @@ public class Cliente {
      * @param datagrama datagrama recebido do servidor
      * @return lista imutável de nomes de arquivos
      */
-    private List<String> extrairLista(Datagrama datagrama) {
+    private List<String> extrairLista (Datagrama datagrama) {
 
-        String bruto = datagrama.getCampo("lista");
-
-        if (bruto == null || bruto.isBlank()) bruto = datagrama.getCampo("arquivos");
+        String bruto = datagrama.getListaArquivos();
 
         if (bruto == null || bruto.isBlank()) return Collections.emptyList();
 
@@ -351,7 +348,7 @@ public class Cliente {
      *
      * @param mensagem texto informativo
      */
-    private void notificarStatus(String mensagem) {
+    private void notificarStatus (String mensagem) {
 
         SwingUtilities.invokeLater(() -> INTERFACE.exibirMensagem(mensagem));
     }
@@ -383,21 +380,23 @@ public class Cliente {
 
     /**
      * Ponto de entrada da aplicação.
-     *
      * Uso:
      * java cliente.Cliente [servidor] [porta]
      *
      * @param args argumentos opcionais de linha de comando
      */
-    public static void main(String[] args) {
+    public static void main (String[] args) {
 
-        final String servidor = args.length > 0 ? args[0] : "localhost";
+        final String servidor = args.length > 0? args[0] : "localhost";
 
-        final int porta = args.length > 1 ? Integer.parseInt(args[1]) : 5000;
+        final int porta = args.length > 1? Integer.parseInt(args[1]) : 5000;
 
         SwingUtilities.invokeLater(() -> {
+
             InterfaceGrafica janela = new InterfaceGrafica();
+
             Cliente cliente = new Cliente(servidor, porta, janela);
+
             cliente.iniciar();
         });
     }

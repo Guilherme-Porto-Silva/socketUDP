@@ -14,23 +14,17 @@ import java.util.regex.Pattern;
 
 /**
  * Define o contrato binário único dos datagramas do sistema.
- *
  * Cabeçalho fixo (todos os números em big-endian):
- *
  * +---------------------------------------------------------------+
  * | byte 0 | versão do protocolo = 1                              |
  * | byte 1 | código do COMANDO (Comando)                          |
  * | ...    | campos específicos do COMANDO                        |
  * +---------------------------------------------------------------+
- *
  * Strings são sempre serializadas como:
  *   [int 4 bytes - comprimento em bytes][bytes UTF-8]
- *
  * Campos numéricos usam a codificação big-endian do DataOutputStream
  * (long = 8 bytes, int = 4 bytes).
- *
  * Layout por COMANDO, após o cabeçalho:
- *
  * REGISTER    : idCliente (String)
  * LIST        : (nenhum campo)
  * UPLOAD      : nome (String)
@@ -50,18 +44,14 @@ import java.util.regex.Pattern;
  *               - ACK de DATA   :  idTransferencia = id da transferência, numeroFragmento = fragmento confirmado
  * ERROR       : codigoErro (int 4 bytes)
  *               mensagem (String)
- *
  * A lista de arquivos (LIST e UPDATE_LIST) é uma String UTF-8 em que cada
  * arquivo ocupa uma linha no formato "nome;tamanho", por exemplo:
- *
  *   foto.png;2048
  *   relatorio.pdf;1048576
- *
  * Integridade: o campo hash de UPLOAD contém o SHA-256 do arquivo completo,
  * codificado em hexadecimal com 64 caracteres. Após a remontagem no servidor,
  * o hash deve ser recalculado com calcularHashSha256() e comparado com
  * hashConfere().
- *
  * Este arquivo é a única fonte do formato dos datagramas. As demais classes
  * do projeto devem usar Datagrama.serialize() e Datagrama.parse().
  */
@@ -76,14 +66,6 @@ public final class Datagrama {
     public static final int TAMANHO_MAXIMO_PAYLOAD = Fragmento.TAMANHO_MAXIMO;
 
 //  Códigos de erro não definidos na tabela do protocolo; adotados aqui para padronizar as mensagens ERROR. As classes de aplicação podem reutilizá-los.
-
-    public static final int CODIGO_ERRO_GENERICO = 0;
-
-    public static final int CODIGO_ARQUIVO_INEXISTENTE = 1;
-
-    public static final int CODIGO_HASH_DIVERGENTE = 2;
-
-    public static final int CODIGO_TRANSFERENCIA_ABORTADA = 3;
 
     private static final Pattern PADRAO_HASH_SHA256 = Pattern.compile("[0-9a-fA-F]{64}");
 
@@ -111,13 +93,17 @@ public final class Datagrama {
 
     private String mensagemErro;
 
+    private String status;
+
+    private String nomeFinal;
 
 
-    public Datagrama(Comando comando) {
+
+    public Datagrama (Comando comando) {
 
         if (comando == null) throw new IllegalArgumentException("COMANDO não pode ser nulo");
 
-        this.COMANDO = comando;
+        COMANDO = comando;
     }
 
 
@@ -131,6 +117,226 @@ public final class Datagrama {
         datagrama.idCliente = idCliente;
 
         return datagrama;
+    }
+
+
+
+
+
+    public byte[] serialize () {
+
+        validarCampos();
+
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+
+        try (DataOutputStream out = new DataOutputStream(baos)) {
+
+            out.writeByte(VERSAO_PROTOCOLO);
+
+            out.writeByte(COMANDO.getCodigo());
+
+            switch (COMANDO) {
+
+                case REGISTER:
+
+                    escreverString(out, idCliente);
+
+                    break;
+
+                case LIST:
+
+                    break;
+
+                case UPLOAD:
+
+                    escreverString(out, nome);
+
+                    out.writeLong(tamanhoArquivo);
+
+                    out.writeInt(numeroFragmentos);
+
+                    escreverString(out, hash);
+
+                    break;
+
+                case DATA:
+
+                    out.writeInt(idTransferencia);
+
+                    out.writeInt(numeroFragmento);
+
+                    out.writeInt(payload.length);
+
+                    out.write(payload);
+
+                    break;
+
+                case DOWNLOAD:
+
+                    escreverString(out, nome);
+
+                    break;
+
+                case UPDATE_LIST:
+
+                    escreverString(out, listaArquivos);
+
+                    break;
+
+                case ACK:
+
+                    out.writeInt(idTransferencia);
+
+                    out.writeInt(numeroFragmento);
+
+                    break;
+
+                case ERROR:
+
+                    out.writeInt(codigoErro);
+
+                    escreverString(out, mensagemErro);
+
+                    break;
+
+                default:
+
+                    throw new IllegalStateException("Comando sem serialização implementada: " + COMANDO);
+            }
+        }
+
+        catch (IOException e) {
+
+            throw new IllegalStateException("Falha ao serialize datagrama: " + e.getMessage(), e);
+        }
+
+        return baos.toByteArray();
+    }
+
+
+
+    public static Datagrama parse (byte[] dados) {
+
+        if (dados == null || dados.length < 2) throw new IllegalArgumentException("Datagrama inválido: cabeçalho incompleto");
+
+        ByteArrayInputStream bais = new ByteArrayInputStream(dados);
+
+        try (DataInputStream in = new DataInputStream(bais)) {
+
+            byte versao = in.readByte();
+
+            if (versao != VERSAO_PROTOCOLO) throw new IllegalArgumentException("Versão de protocolo não suportada: " + versao);
+
+            byte codigo = in.readByte();
+
+            Comando comando = Comando.fromCodigo(codigo);
+
+            Datagrama datagrama = new Datagrama(comando);
+
+            switch (comando) {
+
+                case REGISTER:
+
+                    datagrama.idCliente = lerString(in);
+
+                    break;
+
+                case LIST:
+
+                    break;
+
+                case UPLOAD:
+
+                    datagrama.nome = lerString(in);
+
+                    datagrama.tamanhoArquivo = in.readLong();
+
+                    datagrama.numeroFragmentos = in.readInt();
+
+                    datagrama.hash = lerString(in);
+
+                    break;
+
+                case DATA:
+
+                    datagrama.idTransferencia = in.readInt();
+
+                    datagrama.numeroFragmento = in.readInt();
+
+                    int tamanhoPayload = in.readInt();
+
+                    if (tamanhoPayload <= 0 || tamanhoPayload > TAMANHO_MAXIMO_PAYLOAD)
+
+                        throw new IllegalArgumentException("Tamanho de payload inválido para DATA: " + tamanhoPayload);
+
+                    byte[] payload = new byte[tamanhoPayload];
+
+                    in.readFully(payload);
+
+                    datagrama.payload = payload;
+
+                    break;
+
+                case DOWNLOAD:
+
+                    datagrama.nome = lerString(in);
+
+                    break;
+
+                case UPDATE_LIST:
+
+                    datagrama.listaArquivos = lerString(in);
+
+                    break;
+
+                case ACK:
+
+                    datagrama.idTransferencia = in.readInt();
+
+                    datagrama.numeroFragmento = in.readInt();
+
+                    break;
+
+                case ERROR:
+
+                    datagrama.codigoErro = in.readInt();
+
+                    datagrama.mensagemErro = lerString(in);
+                    break;
+
+                default:
+                    throw new IllegalArgumentException("Comando não implementado no parse: " + comando);
+            }
+
+            datagrama.validarCampos();
+
+            if (bais.available() != 0) throw new IllegalArgumentException("Datagrama contém bytes não esperados após o COMANDO");
+
+            return datagrama;
+        }
+
+        catch (EOFException e) {
+
+            throw new IllegalArgumentException("Datagrama truncado: " + e.getMessage(), e);
+        }
+
+        catch (IOException e) {
+
+            throw new IllegalArgumentException("Erro ao ler datagrama: " + e.getMessage(), e);
+        }
+    }
+
+
+
+    /**
+     * Define o idTransferencia em datagramas já construídos (ex.: UPLOAD usado
+     * como metadados de download). Retorna {@code this} para encadeamento.
+     */
+    public Datagrama comIdTransferencia (int idDaTransferencia) {
+
+        idTransferencia = idDaTransferencia;
+
+        return this;
     }
 
 
@@ -214,7 +420,7 @@ public final class Datagrama {
 
 
 
-    public static Datagrama atualizarLista(String listaArquivos) {
+    public static Datagrama atualizarLista (String listaArquivos) {
 
         if (listaArquivos == null) throw new IllegalArgumentException("listaArquivos não pode ser nula");
 
@@ -275,12 +481,13 @@ public final class Datagrama {
 
     public int getNumeroFragmento () { return numeroFragmento; }
 
-    public byte[] getPayload () {
-        
-        return payload == null ? null : Arrays.copyOf(payload, payload.length);
-    }
+    public String getStatus() { return status; }
 
+    public void setStatus(String status) { status = status; }
 
+    public String getNomeFinal() { return nomeFinal; }
+
+    public void setNomeFinal(String nomeFinal) { nomeFinal = nomeFinal; }
 
     public String getListaArquivos () { return listaArquivos; }
 
@@ -288,227 +495,115 @@ public final class Datagrama {
 
     public String getMensagemErro () { return mensagemErro; }
 
+    public byte[] getPayload () {
+        
+        return payload == null ? null : Arrays.copyOf(payload, payload.length);
+    }
     
     
-    public Fragmento getFragmento() {
+
+    /**
+     * Retorna o valor de um campo como String, usando os nomes da API antiga
+     * e os getters da API nova. Compatível com Cliente.java e ClienteHandler.java.
+     *
+     * @param campo nome do campo (ex.: "nome", "tamanho", "mensagem", "lista")
+     * @return valor como String, ou null/"" quando o campo não estiver definido
+     */
+    public String getCampo(String campo) {
+      
+        if (campo == null) return null;
+
+        return switch (campo.trim()) {
+      
+            case "id", "idCliente" -> idCliente;
+      
+            case "nome" -> nome;
+      
+            case "tamanho", "tamanhoArquivo" -> String.valueOf(tamanhoArquivo);
+      
+            case "fragmentos", "numeroFragmentos" -> String.valueOf(numeroFragmentos);
+      
+            case "hash" -> hash;
+      
+            case "transferencia", "idTransferencia" -> String.valueOf(idTransferencia);
+      
+            case "fragmento", "numeroFragmento" -> String.valueOf(numeroFragmento);
+      
+            case "lista", "arquivos" -> listaArquivos;
+      
+            case "codigo", "codigoErro" -> String.valueOf(codigoErro);
+      
+            case "mensagem", "mensagemErro" -> mensagemErro;
+      
+            case "status" -> status;
+      
+            case "nomeFinal" -> nomeFinal;
+      
+            default -> null;
+        };
+    }
+    
+    
+
+    /**
+     * Define o valor de um campo pelo nome. Usado principalmente para manter
+     * compatibilidade com o código antigo que usava campos genéricos.
+     */
+    public void setCampo(String campo, String valor) {
+        
+        if (campo == null) return;
+
+        switch (campo.trim()) {
+        
+            case "id", "idCliente" -> idCliente = valor;
+        
+            case "nome" -> nome = valor;
+        
+            case "tamanho", "tamanhoArquivo" -> tamanhoArquivo = parseLong(valor);
+        
+            case "fragmentos", "numeroFragmentos" -> numeroFragmentos = parseInt(valor);
+        
+            case "hash" -> hash = valor;
+        
+            case "transferencia", "idTransferencia" -> idTransferencia = parseInt(valor);
+        
+            case "fragmento", "numeroFragmento" -> numeroFragmento = parseInt(valor);
+        
+            case "lista", "arquivos" -> listaArquivos = valor;
+        
+            case "codigo", "codigoErro" -> codigoErro = parseInt(valor);
+        
+            case "mensagem", "mensagemErro" -> mensagemErro = valor;
+        
+            case "status" -> status = valor;
+        
+            case "nomeFinal" -> nomeFinal = valor;
+        }
+    }
+    
+    
+
+    private static long parseLong (String valor) {
+        
+        try { return Long.parseLong(valor); } catch (Exception e) { return 0L; }
+    }
+    
+    
+
+    private static int parseInt (String valor) {
+    
+        try { return Integer.parseInt(valor); } catch (Exception e) { return 0; }
+    }
+
+    
+    
+    public Fragmento getFragmento () {
         
         if (COMANDO != Comando.DATA) throw new IllegalStateException("getFragmento() só é válido para datagramas DATA");
         
         if (payload == null) throw new IllegalStateException("payload não inicializado");
         
         return new Fragmento(idTransferencia, numeroFragmento, payload);
-    }
-    
-    
-
-    public byte[] serialize () {
-        
-        validarCampos();
-
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        
-        try (DataOutputStream out = new DataOutputStream(baos)) {
-        
-            out.writeByte(VERSAO_PROTOCOLO);
-        
-            out.writeByte(COMANDO.getCodigo());
-
-            
-            
-            switch (COMANDO) {
-        
-                case REGISTER:
-                    
-                    escreverString(out, idCliente);
-                    
-                    break;
-        
-                case LIST:
-                    
-                    break;
-        
-                case UPLOAD:
-                    
-                    escreverString(out, nome);
-                    
-                    out.writeLong(tamanhoArquivo);
-                    
-                    out.writeInt(numeroFragmentos);
-                    
-                    escreverString(out, hash);
-                    
-                    break;
-        
-                case DATA:
-                    
-                    out.writeInt(idTransferencia);
-                    
-                    out.writeInt(numeroFragmento);
-                    
-                    out.writeInt(payload.length);
-                    
-                    out.write(payload);
-                    
-                    break;
-        
-                case DOWNLOAD:
-                    
-                    escreverString(out, nome);
-                    
-                    break;
-                    
-                case UPDATE_LIST:
-                    
-                    escreverString(out, listaArquivos);
-                    
-                    break;
-                    
-                case ACK:
-                    
-                    out.writeInt(idTransferencia);
-                    
-                    out.writeInt(numeroFragmento);
-                    
-                    break;
-                    
-                case ERROR:
-                    
-                    out.writeInt(codigoErro);
-                    
-                    escreverString(out, mensagemErro);
-                    
-                    break;
-                    
-                default:
-                    
-                    throw new IllegalStateException("Comando sem serialização implementada: " + COMANDO);
-            }
-            
-        }
-        
-        catch (IOException e) {
-        
-            throw new IllegalStateException("Falha ao serialize datagrama: " + e.getMessage(), e);
-        }
-
-        return baos.toByteArray();
-    }
-
-    
-    
-    public static Datagrama parse (byte[] dados) {
-        
-        if (dados == null || dados.length < 2) throw new IllegalArgumentException("Datagrama inválido: cabeçalho incompleto");
-
-        ByteArrayInputStream bais = new ByteArrayInputStream(dados);
-        
-        try (DataInputStream in = new DataInputStream(bais)) {
-        
-            byte versao = in.readByte();
-        
-            if (versao != VERSAO_PROTOCOLO) throw new IllegalArgumentException("Versão de protocolo não suportada: " + versao);
-
-            byte codigo = in.readByte();
-            
-            Comando comando = Comando.fromCodigo(codigo);
-            
-            Datagrama datagrama = new Datagrama(comando);
-
-            
-            
-            switch (comando) {
-            
-                case REGISTER:
-                    
-                    datagrama.idCliente = lerString(in);
-                    
-                    break;
-                    
-                case LIST:
-                    
-                    break;
-                    
-                case UPLOAD:
-                    
-                    datagrama.nome = lerString(in);
-                    
-                    datagrama.tamanhoArquivo = in.readLong();
-                    
-                    datagrama.numeroFragmentos = in.readInt();
-                    
-                    datagrama.hash = lerString(in);
-                    
-                    break;
-                    
-                case DATA:
-                    
-                    datagrama.idTransferencia = in.readInt();
-                    
-                    datagrama.numeroFragmento = in.readInt();
-                    
-                    int tamanhoPayload = in.readInt();
-                    
-                    if (tamanhoPayload <= 0 || tamanhoPayload > TAMANHO_MAXIMO_PAYLOAD) throw new IllegalArgumentException("Tamanho de payload inválido para DATA: " + tamanhoPayload);
-                    
-                    byte[] payload = new byte[tamanhoPayload];
-                    
-                    in.readFully(payload);
-                    
-                    datagrama.payload = payload;
-                    
-                    break;
-                    
-                case DOWNLOAD:
-                    
-                    datagrama.nome = lerString(in);
-                    
-                    break;
-                    
-                case UPDATE_LIST:
-                    
-                    datagrama.listaArquivos = lerString(in);
-                    
-                    break;
-                    
-                case ACK:
-                    
-                    datagrama.idTransferencia = in.readInt();
-                    
-                    datagrama.numeroFragmento = in.readInt();
-                    
-                    break;
-                    
-                case ERROR:
-                    
-                    datagrama.codigoErro = in.readInt();
-                    
-                    datagrama.mensagemErro = lerString(in);
-                    
-                    break;
-                    
-                default:
-                    
-                    throw new IllegalArgumentException("Comando não implementado no parse: " + comando);
-            }
-
-            
-            
-            datagrama.validarCampos();
-
-            if (bais.available() != 0) throw new IllegalArgumentException("Datagrama contém bytes não esperados após o COMANDO");
-
-            return datagrama;
-        }
-        
-        catch (EOFException e) {
-        
-            throw new IllegalArgumentException("Datagrama truncado: " + e.getMessage(), e);
-        }
-        
-        catch (IOException e) {
-        
-            throw new IllegalArgumentException("Erro ao ler datagrama: " + e.getMessage(), e);
-        }
     }
     
     
@@ -560,13 +655,17 @@ public final class Datagrama {
                 if (listaArquivos == null) throw new IllegalArgumentException("UPDATE_LIST exige listaArquivos não nula");
                 
                 break;
-                
+
             case ACK:
-                
-                if (idTransferencia < 0 || numeroFragmento < 0) throw new IllegalArgumentException("ACK exige idTransferencia e numeroFragmento >= 0");
-                
+
+                // Aceita numeroFragmento == -1 como ACK de conclusão.
+
+                if (idTransferencia < 0) throw new IllegalArgumentException("ACK exige um id de transferência maior ou igual a 0");
+
+                if (mensagemErro == null) throw new IllegalArgumentException("ACK exige mensagem não nula.");
+
                 break;
-                
+
             case ERROR:
                 
                 if (mensagemErro == null) throw new IllegalArgumentException("ERROR exige mensagem não nula");

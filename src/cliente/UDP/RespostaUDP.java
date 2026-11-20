@@ -1,4 +1,4 @@
-package cliente;
+package cliente.UDP;
 
 import comum.Datagrama;
 import java.net.InetSocketAddress;
