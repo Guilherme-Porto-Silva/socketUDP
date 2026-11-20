@@ -12,19 +12,41 @@ Sistema cliente-servidor para armazenamento e transferência de arquivos usando 
 
 ```
 servidor-arquivos-udp/
-├── src/servidor/
-│   ├── Servidor.java
-│   ├── ClienteHandler.java
-│   ├── GerenciadorArquivos.java
-│   └── LogServidor.java
-├── src/cliente/
-│   ├── Cliente.java
-│   ├── InterfaceGrafica.java
-│   └── ThreadTransferencia.java
-├── src/comum/
-│   ├── Comando.java
-│   ├── Datagrama.java
-│   └── Fragmento.java
+├── src/
+│   ├── cliente/
+│   │   ├── componentes/
+│   │   │   ├── Conexao.java
+│   │   │   ├── Direcao.java
+│   │   │   ├── EnderecoServidor.java
+│   │   │   ├── MetadadosDownload.java
+│   │   │   ├── Nivel.java
+│   │   │   └── ThreadTransferencia.java
+│   │   ├── fantoches/
+│   │   │   └── SocketTransferencia.java
+│   │   ├── interfaceGrafica/
+│   │   │   ├── ArquivoRemoto.java
+│   │   │   ├── IconePonto.java
+│   │   │   ├── InterfaceGrafica.java
+│   │   │   ├── Monitor.java
+│   │   │   ├── MonitorDaTransferencia.java
+│   │   │   └── RenderizadorArquivo.java
+│   │   ├── UDP/
+│   │   │   ├── ProtocoloUDP.java
+│   │   │   └── RespostaUDP.java
+│   │   └── Cliente.java
+│   ├── comum/
+│   │   ├── Comando.java
+│   │   ├── Datagrama.java
+│   │   └── Fragmento.java
+│   └── servidor/
+│       ├── ClienteHandler.java
+│       ├── GerenciadorArquivos.java
+│       ├── LogServidor.java
+│       ├── ProtocoloUDP.java
+│       ├── ResultadoRecebimento.java
+│       ├── Servidor.java
+│       └── Tipo.java
+├── .gitignore
 └── README.md
 ```
 
