@@ -1,5 +1,6 @@
 package cliente.fantoches;
 
+import cliente.UDP.ProtocoloUDP;
 import cliente.UDP.RespostaUDP;
 import comum.Datagrama;
 import java.io.IOException;
@@ -7,7 +8,6 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetSocketAddress;
 import java.net.SocketTimeoutException;
-import java.util.Arrays;
 
 /**
  * Socket UDP dedicado às transferências de arquivo (subir/baixar).
@@ -16,20 +16,22 @@ import java.util.Arrays;
  * receber ACKs sem disputar datagramas com a escuta.
  * Reutiliza a classe {@link RespostaUDP} para manter o mesmo
  * contrato de resposta (timeout/dados) usado pelo restante do cliente.
+ * O endereço de origem desse socket (porta efêmera própria) identifica a
+ * transferência no servidor, que responde sempre a esse endereço.
  */
-public final class SocketTransferencia extends DatagramSocket implements AutoCloseable {
+public final class SocketTransferencia implements AutoCloseable {
 
     /** Tamanho máximo de um datagrama UDP (payload IP - cabeçalhos UDP/IP). */
     private static final int BUFFER_TAMANHO = 65507;
 
-
-
     private final DatagramSocket FANTOCHE;
+
+
 
     /**
      * Abre um FANTOCHE UDP em porta efêmera, exclusivo para a transferência.
      */
-    public SocketTransferencia() throws IOException {
+    public SocketTransferencia () throws IOException {
 
         FANTOCHE = new DatagramSocket();
     }
@@ -39,13 +41,14 @@ public final class SocketTransferencia extends DatagramSocket implements AutoClo
     /**
      * Envia um datagrama para o servidor de transferência.
      */
-    public void enviar(Datagrama datagrama, InetSocketAddress destino) throws IOException {
+    public void enviar (Datagrama datagrama, InetSocketAddress destino) throws IOException {
 
         if (datagrama == null || destino == null) throw new IllegalArgumentException("Datagrama e destino não podem ser nulos.");
 
         byte[] dados;
 
         try {
+
             dados = datagrama.serialize();
         }
 
@@ -59,56 +62,59 @@ public final class SocketTransferencia extends DatagramSocket implements AutoClo
         FANTOCHE.send(pacote);
     }
 
-    
-    
+
+
     /**
      * Aguarda uma resposta no FANTOCHE de transferência.
      *
      * @param timeoutMs tempo máximo de espera em milissegundos.
      * @return {@link RespostaUDP} com o datagrama ou indicando timeout.
      */
-    public RespostaUDP receber(int timeoutMs) throws IOException {
-    
+    public RespostaUDP receber (int timeoutMs) throws IOException {
+
         byte[] buffer = new byte[BUFFER_TAMANHO];
-    
+
         DatagramPacket pacote = new DatagramPacket(buffer, buffer.length);
 
         FANTOCHE.setSoTimeout(timeoutMs);
-    
+
         try {
+
             FANTOCHE.receive(pacote);
         }
-        
+
         catch (SocketTimeoutException e) {
-        
+
             return RespostaUDP.esgotar();
         }
 
-        return getRespostaUDP(pacote);
+        return ProtocoloUDP.getRespostaUDP(pacote);
     }
 
-    
-    
+
+
     /**
      * Devolve o endereço local (IP e porta efêmera) do FANTOCHE.
      */
-    public InetSocketAddress obterEnderecoLocal() {
+    public InetSocketAddress obterEnderecoLocal () {
+
         return (InetSocketAddress) FANTOCHE.getLocalSocketAddress();
     }
 
-    
-    
+
+
     /**
      * Fecha o FANTOCHE de transferência.
      */
-    public void fechar() {
-        
+    public void fechar () {
+
         if (FANTOCHE != null && !FANTOCHE.isClosed()) FANTOCHE.close();
     }
-    
 
-    
-    @Override public void close() {
+
+
+    @Override public void close () {
+
         fechar();
     }
 }

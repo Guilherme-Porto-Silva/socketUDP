@@ -1,8 +1,8 @@
 package cliente.interfaceGrafica;
 
 import cliente.*;
-import cliente.UDP.ProtocoloUDP;
 import cliente.componentes.Conexao;
+import cliente.componentes.Direcao;
 import cliente.componentes.EnderecoServidor;
 import cliente.componentes.Nivel;
 import cliente.componentes.ThreadTransferencia;
@@ -1155,7 +1155,7 @@ public final class InterfaceGrafica extends JFrame {
 
         String nome = arquivo.getFileName().toString();
 
-        iniciarTransferencia(nome, arquivo, "Enviando \"" + nome + "\" (" + formatarTamanho(tamanho) + ")");
+        iniciarTransferencia(Direcao.UPLOAD, nome, arquivo, "Enviando \"" + nome + "\" (" + formatarTamanho(tamanho) + ")");
     }
 
 
@@ -1242,7 +1242,7 @@ public final class InterfaceGrafica extends JFrame {
             if (resposta != JOptionPane.YES_OPTION) return;
         }
 
-        iniciarTransferencia(nome, pasta, "Baixando \"" + nome + "\" para " + pasta);
+        iniciarTransferencia(Direcao.DOWNLOAD, nome, pasta, "Baixando \"" + nome + "\" para " + pasta);
     }
 
 
@@ -1252,11 +1252,12 @@ public final class InterfaceGrafica extends JFrame {
     /**
      * Inicia upload ou download em segundo plano.
      *
+     * @param direcao      UPLOAD ou DOWNLOAD
      * @param nome         nome do arquivo no servidor
      * @param caminhoLocal arquivo de origem (upload) ou pasta de destino (download)
      * @param descricao    texto registrado na área de status
      */
-    private void iniciarTransferencia (String nome, Path caminhoLocal, String descricao) {
+    private void iniciarTransferencia (Direcao direcao, String nome, Path caminhoLocal, String descricao) {
 
         final String host = CAMPO_SERVIDOR.getText().trim();
 
@@ -1280,7 +1281,7 @@ public final class InterfaceGrafica extends JFrame {
             return;
         }
 
-        MonitorDaTransferencia monitor = new MonitorDaTransferencia();
+        MonitorDaTransferencia monitor = new MonitorDaTransferencia(this::finalizarTransferencia);
 
         transferencia = monitor;
 
@@ -1300,7 +1301,7 @@ public final class InterfaceGrafica extends JFrame {
 
         atualizarControles();
 
-        Thread preparo = new Thread(() -> prepararTransferencia(monitor, host, porta, nome, caminhoLocal), "interface-preparo-transferencia");
+        Thread preparo = new Thread(() -> prepararTransferencia(monitor, direcao, host, porta, nome, caminhoLocal), "interface-preparo-transferencia");
 
         preparo.setDaemon(true);
 
@@ -1329,7 +1330,7 @@ public final class InterfaceGrafica extends JFrame {
      * Resolve o endereço, abre os sockets e dispara a ThreadTransferencia. Roda fora da EDT,
      * porque a resolução de nomes pode demorar.
      */
-    private void prepararTransferencia (MonitorDaTransferencia monitor, String host, int porta, String nome, Path caminhoLocal) {
+    private void prepararTransferencia (MonitorDaTransferencia monitor, Direcao direcao, String host, int porta, String nome, Path caminhoLocal) {
 
         try {
             InetSocketAddress destino = new InetSocketAddress(InetAddress.getByName(host), porta);
@@ -1338,11 +1339,7 @@ public final class InterfaceGrafica extends JFrame {
 
             monitor.adicionarRecurso(meia::fechar);
 
-            ProtocoloUDP protocolo = new ProtocoloUDP(meia);
-
-            monitor.adicionarRecurso(protocolo::fechar);
-            
-            ThreadTransferencia thread = new ThreadTransferencia(protocolo, destino, caminhoLocal, nome, monitor, meia);
+            ThreadTransferencia thread = ThreadTransferencia.criar(direcao, destino, nome, caminhoLocal, monitor, meia);
 
             thread.setDaemon(true);
 
@@ -1429,7 +1426,7 @@ public final class InterfaceGrafica extends JFrame {
 
         else {
 
-            int percentual = (int) Math.round(Math.clamp(fracao, 0.0, 1.0) * 100);
+            int percentual = (int) Math.round(Math.max(0.0, Math.min(1.0, fracao)) * 100);
 
             BARRA_PROGRESSO.setIndeterminate(false);
 

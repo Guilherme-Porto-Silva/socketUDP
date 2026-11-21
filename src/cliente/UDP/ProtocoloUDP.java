@@ -51,10 +51,6 @@ public class ProtocoloUDP {
 
 
 
-    public ProtocoloUDP (String enderecoDoServidor, int portaDoServidor) throws IOException {
-
-        MEIA = new DatagramSocket(new InetSocketAddress(enderecoDoServidor, portaDoServidor));
-    }
 
 
     /**

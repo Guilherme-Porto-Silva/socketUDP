@@ -4,7 +4,7 @@ Sistema cliente-servidor para armazenamento e transferência de arquivos usando 
 
 ## Requisitos
 
-- **Java Development Kit (JDK)** — versão 8 ou superior.
+- **Java Development Kit (JDK)** — versão 17 ou superior (o código usa `record`; testado com o JDK 21).
 - **IntelliJ IDEA** (recomendado) ou apenas o terminal com `javac`/`java`.
 - Para o teste distribuído: **duas máquinas** na mesma rede local, com a porta UDP escolhida liberada no firewall.
 
@@ -57,12 +57,14 @@ servidor-arquivos-udp/
 No diretório raiz do projeto, compile todas as classes para a pasta `out`:
 
 ```
-javac -encoding UTF-8 -d out src/comum/*.java src/servidor/*.java src/cliente/*.java
+javac -encoding UTF-8 -d out src/comum/*.java src/servidor/*.java src/cliente/*.java src/cliente/UDP/*.java src/cliente/componentes/*.java src/cliente/fantoches/*.java src/cliente/interfaceGrafica/*.java
 ```
+
+No Linux e no macOS, o equivalente é `javac -encoding UTF-8 -d out $(find src -name '*.java')`.
 
 ### Iniciar o servidor
 
-O servidor deve ser iniciado **antes** do cliente:
+O servidor deve ser iniciado **antes** do cliente. A porta é opcional (padrão: 5000). A pasta `central/` e o arquivo `log_servidor.txt` são criados no diretório de onde o servidor é iniciado:
 
 ```
 java -cp out servidor.Servidor <porta>
@@ -76,7 +78,7 @@ java -cp out servidor.Servidor 9876
 
 ### Iniciar o cliente
 
-Em outra janela (ou outra máquina), informe o endereço IP do servidor e a porta:
+Em outra janela (ou outra máquina), informe o endereço IP do servidor e a porta (padrão: `localhost` e 5000):
 
 ```
 java -cp out cliente.Cliente <ip-do-servidor> <porta>
@@ -88,7 +90,7 @@ Exemplo — conectando ao servidor `192.168.1.10` na porta 9876:
 java -cp out cliente.Cliente 192.168.1.10 9876
 ```
 
-A porta e o endereço são parâmetros de linha de comando e podem ser alterados conforme a rede. A interface gráfica abre após o cliente registrar-se no servidor.
+A porta e o endereço são parâmetros de linha de comando e podem ser alterados conforme a rede. A interface gráfica abre mostrando o estado da conexão, e o cliente se registra no servidor em segundo plano.
 
 ## Arquitetura
 
@@ -98,8 +100,8 @@ Classes compartilhadas entre cliente e servidor.
 
 | Classe | Responsabilidade |
 |---|---|
-| `Comando.java` | Define os comandos do protocolo — `REGISTER`, `LIST`, `UPLOAD`, `DATA`, `DOWNLOAD`, `UPDATE_LIST` e `ERROR`. |
-| `Datagrama.java` | Modela o datagrama trocado entre cliente e servidor, com os campos de controle e o payload do fragmento. |
+| `Comando.java` | Define os comandos do protocolo — `REGISTER`, `LIST`, `UPLOAD`, `DATA`, `DOWNLOAD`, `UPDATE_LIST`, `ACK` e `ERROR` —, cada um com um código de 1 byte. |
+| `Datagrama.java` | Contrato binário único dos datagramas: serializa e interpreta cada comando, valida os campos e calcula e confere o hash SHA-256. |
 | `Fragmento.java` | Representa um fragmento do arquivo, contendo o número sequencial e o payload de até 1024 bytes. |
 
 ### Pacote `src/servidor`
@@ -108,20 +110,27 @@ Lado servidor.
 
 | Classe | Responsabilidade |
 |---|---|
-| `Servidor.java` | Abre o socket UDP, aguarda datagramas de novos clientes e lança uma thread por cliente. |
-| `ClienteHandler.java` | Thread que atende um cliente específico, processando seus comandos e conduzindo a transferência. |
-| `GerenciadorArquivos.java` | Gerencia a pasta central de arquivos: salva, renomeia nomes duplicados, lista e localiza arquivos para envio. |
+| `Servidor.java` | Único leitor do socket UDP (por meio de `ProtocoloUDP`). Registra clientes (`REGISTER`), entrega cada datagrama à `ClienteHandler` do endereço de origem e cria uma `ClienteHandler` para cada transferência que chega de um socket dedicado do cliente. Gera os ids de transferência e envia `UPDATE_LIST` a todos os clientes registrados. |
+| `ClienteHandler.java` | Thread que atende um cliente registrado (`LIST`, `UPLOAD`, `DOWNLOAD`) ou uma única transferência. Recebe os datagramas pela fila que o `Servidor` alimenta; aplica ACK por fragmento, retransmissão, descarte de duplicados, remontagem fora de ordem e conferência do hash. |
+| `GerenciadorArquivos.java` | Gerencia a pasta central de arquivos: salva, renomeia nomes duplicados, lista (com tamanho), lê e localiza arquivos para envio. |
 | `LogServidor.java` | Grava o `log_servidor.txt` no formato `[AAAA-MM-DD HH:MM:SS] [IP:porta] [OPERAÇÃO] [STATUS] detalhes`. |
+| `ProtocoloUDP.java` | Camada de rede do servidor: abre o socket UDP, envia datagramas e recebe com timeout, devolvendo um `ResultadoRecebimento`. |
+| `ResultadoRecebimento.java` / `Tipo.java` | Resultado de uma recepção: datagrama válido (`DATAGRAMA`), tempo esgotado (`TIMEOUT`) ou datagrama malformado (`MALFORMADO`). |
 
 ### Pacote `src/cliente`
 
-Lado cliente.
+Lado cliente. A classe `Cliente` fica na raiz do pacote; o restante se divide em quatro subpacotes.
 
 | Classe | Responsabilidade |
 |---|---|
-| `Cliente.java` | Mantém a comunicação UDP com o servidor e expõe operações de registro, listagem, upload e download. |
-| `InterfaceGrafica.java` | Interface Swing com seleção de arquivo, lista sincronizada, botões de upload/download, barra de progresso e área de status. |
-| `ThreadTransferencia.java` | Executa upload e download em thread separada da EDT, evitando o travamento da interface. |
+| `Cliente.java` | Ponto de entrada. Gera o id do cliente, registra-se no servidor (`REGISTER`), escuta `UPDATE_LIST`, solicita a lista inicial (`LIST`) e detecta servidor indisponível por timeout. |
+| `UDP/ProtocoloUDP.java`, `UDP/RespostaUDP.java` | Transporte UDP do cliente (socket principal, envio e recepção com timeout) e o resultado de uma recepção (datagrama ou tempo esgotado). |
+| `interfaceGrafica/InterfaceGrafica.java` | Interface Swing com seleção de arquivo, lista sincronizada (nome e tamanho), botões de upload/download, barra de progresso com cancelamento e área de status. |
+| `interfaceGrafica/Monitor.java`, `MonitorDaTransferencia.java` | Canal pelo qual a transferência informa progresso, status e resultado à interface sem conhecer Swing; a interface lê esses valores por um `Timer` da EDT. |
+| `interfaceGrafica/ArquivoRemoto.java`, `RenderizadorArquivo.java`, `IconePonto.java` | Item da lista de arquivos, seu renderizador e o ícone de estado da conexão. |
+| `componentes/ThreadTransferencia.java` | Executa upload e download em thread separada da EDT, evitando o travamento da interface. |
+| `componentes/Conexao.java`, `Direcao.java`, `EnderecoServidor.java`, `MetadadosDownload.java`, `Nivel.java` | Tipos de apoio: estado da conexão, direção da transferência, endereço do servidor, metadados de um download e gravidade das mensagens de status. |
+| `fantoches/SocketTransferencia.java` | Socket UDP dedicado a uma transferência (porta efêmera própria), independente do socket principal do cliente. |
 
 ## Protocolo
 
@@ -130,31 +139,32 @@ Lado cliente.
 | Comando | Sentido | Campos | Resposta |
 |---|---|---|---|
 | `REGISTER` | C→S | id cliente | `ACK` |
-| `LIST` | C→S | (vazio) | lista arquivos |
-| `UPLOAD` | C→S | nome, tamanho, nº de fragmentos, hash | `ACK`/`ERROR` |
+| `LIST` | C→S | (vazio) | lista arquivos (datagrama `UPDATE_LIST`) |
+| `UPLOAD` | C→S | nome, tamanho, nº de fragmentos, hash | `ACK` com o id da transferência / `ERROR` |
 | `DATA` | ambos | id transferência, nº do fragmento, payload | `ACK` fragmento |
-| `DOWNLOAD` | C→S | nome | metadados + `DATA` |
+| `DOWNLOAD` | C→S | nome | metadados (no layout do `UPLOAD`) + `DATA` |
 | `UPDATE_LIST` | S→C | lista atualizada | (opcional) |
+| `ACK` | ambos | id transferência, nº do fragmento | n/a |
 | `ERROR` | ambos | código, mensagem | n/a |
+
+O `ACK` do `REGISTER` leva id 0 e fragmento 0; o `ACK` do `UPLOAD` devolve o id atribuído pelo servidor; o `ACK` de um `DATA` confirma o fragmento recebido. Ao final de um upload ou download, o servidor envia um `ACK` de conclusão (nº do fragmento `-1`) depois de remontar o arquivo, conferir o hash e gravar.
 
 ### Formato dos datagramas
 
-Os datagramas de controle carregam os campos do comando como texto; apenas o comando `DATA` carrega o payload binário do arquivo. A tabela abaixo relaciona cada campo, seu tamanho e significado:
+Todo datagrama começa com 2 bytes: a **versão do protocolo** (valor 1) e o **código do comando** (1 a 8). Em seguida vêm os campos do comando, na ordem da tabela abaixo. Números usam big-endian (`int` com 4 bytes, `long` com 8 bytes) e textos usam UTF-8 precedido do comprimento em bytes (`int`). Somente `Datagrama.java` conhece esse formato.
 
-| Campo | Tamanho | Significado |
-|---|---|---|
-| `comando` | variável (texto UTF-8) | Identifica a operação: `REGISTER`, `LIST`, `UPLOAD`, `DATA`, `DOWNLOAD`, `UPDATE_LIST` ou `ERROR`. |
-| `idCliente` | variável (texto UTF-8) | Identificador único do cliente na sessão. |
-| `idTransferencia` | variável (texto UTF-8) | Identificador da transferência em curso; correlaciona os fragmentos ao arquivo enviado. |
-| `nome` | variável (texto UTF-8) | Nome do arquivo no servidor. |
-| `tamanho` | variável (numérico) | Tamanho total do arquivo em bytes. |
-| `numFragmentos` | variável (numérico) | Quantidade total de fragmentos do arquivo. |
-| `numFragmento` | variável (numérico) | Índice sequencial do fragmento (de 0 até `numFragmentos - 1`). |
-| `hash` | variável (texto UTF-8) | Hash do arquivo, enviado no `UPLOAD` para verificação de integridade. |
-| `payload` | até 1024 bytes | Conteúdo do fragmento no comando `DATA`; fragmentos intermediários têm 1024 bytes e o último pode ser menor. |
-| `codigo` | variável (numérico) | Código de erro no comando `ERROR`. |
-| `mensagem` | variável (texto UTF-8) | Descrição legível do erro no comando `ERROR`. |
-| `listaArquivos` | variável (texto UTF-8) | Nomes dos arquivos disponíveis, enviados no `UPDATE_LIST` e na resposta ao `LIST`. |
+| Comando (código) | Campos, na ordem |
+|---|---|
+| `REGISTER` (1) | `idCliente` (texto) |
+| `LIST` (2) | nenhum |
+| `UPLOAD` (3) | `nome` (texto), `tamanhoArquivo` (`long`), `numeroFragmentos` (`int`), `hash` (texto: SHA-256 em hexadecimal, 64 caracteres), `idTransferencia` (`int`: 0 no pedido do cliente; o id da transferência nos metadados de um download) |
+| `DATA` (4) | `idTransferencia` (`int`), `numeroFragmento` (`int`), `comprimentoPayload` (`int`), `payload` (1 a 1024 bytes) |
+| `DOWNLOAD` (5) | `nome` (texto) |
+| `UPDATE_LIST` (6) | `listaArquivos` (texto: um item `nome;tamanho` por linha) |
+| `ACK` (7) | `idTransferencia` (`int`), `numeroFragmento` (`int`) |
+| `ERROR` (8) | `codigoErro` (`int`), `mensagem` (texto) |
+
+Um datagrama `DATA` com payload completo ocupa 1038 bytes (14 de cabeçalho e 1024 de payload), abaixo do MTU Ethernet de 1500 bytes mesmo com os 28 bytes dos cabeçalhos IPv4 e UDP.
 
 ## Confiabilidade sobre UDP
 
@@ -165,6 +175,7 @@ Os datagramas de controle carregam os campos do comando como texto; apenas o com
 - **Retransmissão**: limite de **5 tentativas** por fragmento; ao extrapolar, a transferência é abortada e um erro é reportado.
 - **Duplicados**: fragmentos duplicados são descartados.
 - **Fora de ordem**: fragmentos fora de ordem são armazenados em buffer e remontados quando a transferência estiver completa.
+- **Integridade**: o hash SHA-256 do arquivo remontado é conferido no servidor (upload) e no cliente (download); hash divergente aborta a operação com erro. O cliente só considera o upload concluído quando recebe o `ACK` de conclusão do servidor.
 - **Arquivo inexistente**: o servidor responde com `ERROR` ao pedido de download de um nome que não existe.
 - **Servidor indisponível**: detectado por timeout no cliente, que exibe mensagem de erro na interface gráfica.
 
@@ -172,7 +183,8 @@ Os datagramas de controle carregam os campos do comando como texto; apenas o com
 
 | Decisão | Justificativa |
 |---|---|
-| Concorrência com threads (uma por cliente) | Escolha mais simples e segura em Java; evita a complexidade de NIO/select. |
+| Concorrência com threads (uma por cliente) | Escolha mais simples e segura em Java; evita a complexidade de NIO/select. O `Servidor` é o único leitor do socket e entrega cada datagrama à fila da thread do endereço de origem, sem disputa pelo socket. |
+| Socket dedicado por transferência | A thread de transferência recebe seus ACKs e fragmentos sem disputar datagramas com a escuta de `UPDATE_LIST` no socket principal; o servidor atende cada transferência pelo endereço de origem. |
 | Duplicados: renomear automaticamente (sufixo numérico) | Preserva ambos os arquivos; mais seguro do que sobrescrever. |
 | Interface gráfica com Swing | Nativo do JDK, sem dependências externas, implementação mais rápida. |
 | Fragmento de 1024 bytes (1 KB) | Cabe no MTU Ethernet (1500 bytes), minimiza perdas e fragmentação de rede. |

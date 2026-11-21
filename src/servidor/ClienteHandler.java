@@ -4,27 +4,36 @@ import comum.Comando;
 import comum.Datagrama;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.net.DatagramPacket;
-import java.net.DatagramSocket;
-import java.net.InetAddress;
-import java.net.SocketException;
+import java.net.InetSocketAddress;
 import java.net.SocketTimeoutException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 /**
- * ClienteHandler — thread que processa os comandos de um cliente registrado.
+ * ClienteHandler — thread que atende os comandos de um cliente.
  * Atende:
  * - LIST: devolve a lista atual de arquivos do repositório.
  * - UPLOAD: recebe fragmentos DATA, confirma cada um, remonta fora de ordem e valida o hash.
  * - DOWNLOAD: envia fragmentos numerados e reenvia os que ficarem sem ACK (máximo 5 tentativas).
  * - UPDATE_LIST: disparado via Servidor quando o repositório muda.
+ *
+ * Existem dois tipos de atendimento, com a mesma lógica de comandos:
+ * - cliente registrado (REGISTER): thread de vida longa, criada pelo Servidor, que atende os
+ *   comandos enviados pelo socket principal do cliente;
+ * - transferência avulsa: thread criada pelo Servidor quando um UPLOAD ou DOWNLOAD chega de um
+ *   endereço sem registro, isto é, do socket dedicado de uma transferência do cliente. Atende
+ *   uma única operação e termina.
+ *
+ * A thread nunca lê o socket UDP. O Servidor é o único leitor: ele entrega cada datagrama, por
+ * {@link #entregar(Datagrama)}, à fila do atendimento do endereço de origem. Assim, vários
+ * atendimentos convivem na mesma porta UDP sem disputar datagramas entre si.
  */
 public class ClienteHandler implements Runnable {
 
@@ -34,11 +43,9 @@ public class ClienteHandler implements Runnable {
 
     private static final int MAX_TENTATIVAS = 5;
 
-    private final DatagramSocket FANTOCHE;
+    private final ProtocoloUDP PROTOCOLO;
 
-    private final InetAddress ENDERECO_DO_CLIENTE;
-
-    private final int PORTA_DO_CLIENTE;
+    private final InetSocketAddress ENDERECO_DO_CLIENTE;
 
     private final GerenciadorArquivos GERENCIADOR;
 
@@ -48,19 +55,25 @@ public class ClienteHandler implements Runnable {
 
     private final String ID_CLIENTE;
 
+    /** Verdadeiro para a transferência avulsa: a thread atende uma operação e termina. */
+    private final boolean TRANSFERENCIA_UNICA;
+
+    /** Datagramas do endereço deste atendimento, entregues pelo Servidor. */
+    private final BlockingQueue<Datagrama> FILA = new LinkedBlockingQueue<>();
+
     private volatile boolean ativo = true;
+
+    /** Metadados do download em andamento; reenviados se o cliente repetir o DOWNLOAD. */
+    private Datagrama metadadosDoDownload;
 
 
 
     public ClienteHandler
-      (DatagramSocket socket, InetAddress enderecoCliente, int portaCliente, GerenciadorArquivos gerenciador, LogServidor log, Servidor servidor, String idCliente)
-            throws SocketException {
+      (ProtocoloUDP protocolo, InetSocketAddress enderecoCliente, GerenciadorArquivos gerenciador, LogServidor log, Servidor servidor, String idCliente, boolean transferenciaUnica) {
 
-        FANTOCHE = socket;
+        PROTOCOLO = protocolo;
 
         ENDERECO_DO_CLIENTE = enderecoCliente;
-
-        PORTA_DO_CLIENTE = portaCliente;
 
         GERENCIADOR = gerenciador;
 
@@ -70,74 +83,107 @@ public class ClienteHandler implements Runnable {
 
         ID_CLIENTE = idCliente;
 
-        FANTOCHE.setSoTimeout(TIMEOUT_MS);
+        TRANSFERENCIA_UNICA = transferenciaUnica;
 
-        registrarLog("CONEXAO", "OK", "Cliente " + idCliente + " iniciado");
+        if (!TRANSFERENCIA_UNICA) RELATORIO.registrarConexao(origem(), "Cliente " + idCliente + " iniciado");
+    }
+
+
+
+    /** Recebe do Servidor um datagrama vindo do endereço deste atendimento. */
+    public void entregar (Datagrama datagrama) {
+
+        FILA.offer(datagrama);
     }
 
 
 
     @Override public void run () {
 
-        while (ativo) {
+        try {
 
-            try {
-                Datagrama datagrama = receberDatagrama(TIMEOUT_MS);
+            if (TRANSFERENCIA_UNICA) {
 
-                processar(datagrama);
+                try { processarComSeguranca(receberDatagrama(TIMEOUT_MS)); }
+
+                catch (SocketTimeoutException e) { RELATORIO.registrarTimeout(origem(), "Transferência sem comando inicial."); }
             }
 
-            catch (SocketTimeoutException e) {
+            else {
 
-                System.out.println("Período de ociosidade: nenhum comando chegou nos últimos 2 s. Thread mantida viva.");
-            }
+                while (ativo) {
 
-            catch (IOException e) {
+                    try { processarComSeguranca(receberDatagrama(TIMEOUT_MS)); }
 
-                registrarLog("CONEXAO", "ERRO", "Falha de comunicacao: " + e.getMessage());
-
-                break;
+                    catch (SocketTimeoutException e) { /* cliente ocioso: segue aguardando comandos */ }
+                }
             }
         }
 
-        encerrar();
+        catch (IOException e) {
+
+            RELATORIO.registrarErro(origem(), "Atendimento interrompido: " + e.getMessage());
+        }
+
+        finally { encerrar(); }
     }
 
 
 
-    private void processar(Datagrama datagrama) throws IOException {
+    /** Falha em um comando não derruba o atendimento: o erro é registrado e informado ao cliente. */
+    private void processarComSeguranca (Datagrama datagrama) {
+
+        try { processar(datagrama); }
+
+        catch (ClienteAbortouException e) {
+
+            RELATORIO.registrarErro(origem(), "Cliente abortou a operação: " + e.getMessage());
+        }
+
+        catch (IOException | RuntimeException e) {
+
+            RELATORIO.registrarErro(origem(), "Falha ao processar " + datagrama.getComando() + ": " + e.getMessage());
+
+            enviarErro("5000", "Falha interna ao processar " + datagrama.getComando());
+        }
+    }
+
+
+
+    private void processar (Datagrama datagrama) throws IOException {
 
         Comando comando = datagrama.getComando();
 
-        if (comando == Comando.LIST) processarLista(datagrama);
+        switch (comando) {
 
-        else if (comando == Comando.UPLOAD) processarUpload(datagrama);
+            case LIST -> processarLista();
 
-        else if (comando == Comando.DOWNLOAD) baixar(datagrama);
+            case UPLOAD -> processarUpload(datagrama);
 
-        else if (comando == Comando.ERROR) registrarLog("CLIENTE", "ERRO", datagrama.getMensagemErro());
+            case DOWNLOAD -> baixar(datagrama);
 
-        else enviarErro(datagrama, "1001", "Comando nao suportado: " + comando);
+            case ERROR -> RELATORIO.registrarErro(origem(), "Cliente reportou: " + datagrama.getMensagemErro());
+
+            case ACK, DATA -> { /* confirmação ou fragmento atrasado de uma operação já encerrada: ignorado */ }
+
+            default -> enviarErro("1001", "Comando nao suportado: " + comando);
+        }
     }
 
 
 
-    private void processarLista(Datagrama pedido) throws IOException {
+    private void processarLista () throws IOException {
 
-        List<String> arquivos = GERENCIADOR.listarArquivos();
+        String lista = SERVIDOR.listaSerializada();
 
-        String lista = String.join(";", arquivos);
+        enviar(Datagrama.atualizarLista(lista));
 
-        Datagrama resposta = Datagrama.atualizarLista(lista);
-
-        enviar(resposta);
-
-        registrarLog("LIST", "OK", arquivos.size() + " arquivo(s) no repositorio");
+        RELATORIO.registrar(origem(), "LIST", "OK", "Lista de arquivos enviada ao cliente");
     }
 
 
 
-    private void processarUpload(Datagrama pedido) throws IOException {
+    private void processarUpload (Datagrama pedido) throws IOException {
 
         String nomeOriginal = pedido.getNome();
 
@@ -149,33 +195,31 @@ public class ClienteHandler implements Runnable {
 
         if (nomeOriginal == null || nomeOriginal.isEmpty() || hashInformado == null || hashInformado.isEmpty()) {
 
-            enviarErro(pedido, "2001", "Campos obrigatorios ausentes no UPLOAD");
+            enviarErro("2001", "Campos obrigatorios ausentes no UPLOAD");
 
             return;
         }
 
         if (totalFragmentos < 0) {
 
-            enviarErro(pedido, "2002", "Numero de fragmentos invalido");
+            enviarErro("2002", "Numero de fragmentos invalido");
 
             return;
         }
 
         // Atribui um id de transferência único para esta operação.
-
         int idTransferencia = SERVIDOR.novoIdTransferencia();
 
         Map<Integer, byte[]> fragmentosRecebidos = new HashMap<>();
 
-        Set<Integer> numerosConfirmados = new HashSet<>();
-
         // ACK inicial do UPLOAD: informa idTransferencia ao cliente.
-
         enviarAck(idTransferencia, 0);
+
+        RELATORIO.registrarUpload(origem(), "INICIO", nomeOriginal + " (" + tamanho + " bytes em " + totalFragmentos + " fragmentos, id=" + idTransferencia + ")");
 
         int esgotamentosConsecutivos = 0;
 
-        while (numerosConfirmados.size() < totalFragmentos) {
+        while (fragmentosRecebidos.size() < totalFragmentos) {
 
             Datagrama datagrama;
 
@@ -185,13 +229,13 @@ public class ClienteHandler implements Runnable {
 
                 esgotamentosConsecutivos++;
 
-                registrarLog("UPLOAD", "TIMEOUT", "Aguardando fragmentos (" + esgotamentosConsecutivos + "/" + MAX_TENTATIVAS + ")");
+                RELATORIO.registrarTimeout(origem(), "UPLOAD de " + nomeOriginal + " aguardando fragmentos (" + esgotamentosConsecutivos + "/" + MAX_TENTATIVAS + ")");
 
                 if (esgotamentosConsecutivos >= MAX_TENTATIVAS) {
 
-                    enviarErro(pedido, "2003", "Timeout aguardando fragmentos do upload");
+                    enviarErro("2003", "Timeout aguardando fragmentos do upload");
 
-                    registrarLog("UPLOAD", "ERRO", "Abortado por esgotar aguardando fragmentos");
+                    RELATORIO.registrarUpload(origem(), "ERRO", "Abortado por timeout aguardando fragmentos de " + nomeOriginal);
 
                     return;
                 }
@@ -199,24 +243,17 @@ public class ClienteHandler implements Runnable {
                 continue;
             }
 
-            catch (IOException e) {
-
-                enviarErro(pedido, "2004", "Falha de comunicacao durante upload: " + e.getMessage());
-
-                registrarLog("UPLOAD", "ERRO", e.getMessage());
-
-                return;
-            }
-
             esgotamentosConsecutivos = 0;
 
-            if ( (datagrama.getComando() == Comando.DATA) && (datagrama.getIdTransferencia() == idTransferencia) ) {
+            Comando comando = datagrama.getComando();
+
+            if ( (comando == Comando.DATA) && (datagrama.getIdTransferencia() == idTransferencia) ) {
 
                 int numero = datagrama.getNumeroFragmento();
 
                 if (numero < 0 || numero >= totalFragmentos) {
 
-                    enviarErro(pedido, "2005", "Fragmento fora dos limites: " + numero);
+                    enviarErro("2005", "Fragmento fora dos limites: " + numero);
 
                     continue;
                 }
@@ -228,7 +265,6 @@ public class ClienteHandler implements Runnable {
                 if (fragmentosRecebidos.containsKey(numero)) {
 
                     // Duplicado: descarta e reconfirma.
-
                     enviarAck(idTransferencia, numero);
 
                     continue;
@@ -236,28 +272,31 @@ public class ClienteHandler implements Runnable {
 
                 fragmentosRecebidos.put(numero, payload);
 
-                numerosConfirmados.add(numero);
-
                 enviarAck(idTransferencia, numero);
             }
 
-            else if (datagrama.getComando() == Comando.ERROR) {
+            else if (comando == Comando.UPLOAD) {
 
-                registrarLog("UPLOAD", "ERRO", "Cliente reportou: " + datagrama.getMensagemErro());
+                // O cliente repetiu o pedido: o ACK inicial se perdeu.
+                enviarAck(idTransferencia, 0);
+            }
+
+            else if (comando == Comando.ERROR) {
+
+                RELATORIO.registrarUpload(origem(), "ERRO", "Cliente reportou: " + datagrama.getMensagemErro());
 
                 return;
             }
         }
 
         // Remonta e valida.
-
         byte[] conteudo = remontar(fragmentosRecebidos, totalFragmentos, tamanho);
 
         if (conteudo == null) {
 
-            enviarErro(pedido, "2006", "Remontagem falhou: tamanho dos fragmentos inconsistente");
+            enviarErro("2006", "Remontagem falhou: tamanho dos fragmentos inconsistente");
 
-            registrarLog("UPLOAD", "ERRO", "Remontagem falhou para " + nomeOriginal);
+            RELATORIO.registrarUpload(origem(), "ERRO", "Remontagem falhou para " + nomeOriginal);
 
             return;
         }
@@ -266,165 +305,185 @@ public class ClienteHandler implements Runnable {
 
         if (!hashCalculado.equalsIgnoreCase(hashInformado)) {
 
-            enviarErro(pedido, "2007", "Hash do arquivo nao confere");
+            enviarErro("2007", "Hash do arquivo nao confere");
 
-            registrarLog("UPLOAD", "ERRO", "Divergencia de hash para " + nomeOriginal);
+            RELATORIO.registrarUpload(origem(), "ERRO", "Divergencia de hash para " + nomeOriginal);
 
             return;
         }
 
-        String nomeFinal = GERENCIADOR.salvarArquivo(nomeOriginal, conteudo);
+        String nomeFinal;
 
-        registrarLog("UPLOAD", "OK", nomeOriginal + " salvo como " + nomeFinal + " (" + conteudo.length + " bytes)");
+        try { nomeFinal = GERENCIADOR.salvarArquivo(nomeOriginal, conteudo); }
+
+        catch (IOException e) {
+
+            enviarErro("2008", "Falha ao gravar o arquivo no servidor");
+
+            RELATORIO.registrarUpload(origem(), "ERRO", "Falha ao gravar " + nomeOriginal + ": " + e.getMessage());
+
+            return;
+        }
+
+        RELATORIO.registrarUpload(origem(), "OK", nomeOriginal + " salvo como " + nomeFinal + " (" + conteudo.length + " bytes)");
 
         SERVIDOR.notificarAtualizacaoLista();
 
         // ACK final de conclusão (numeroFragmento=-1 sinaliza fim).
-
         Datagrama conclusao = Datagrama.ack(idTransferencia, -1);
 
         enviar(conclusao);
+
+        if (TRANSFERENCIA_UNICA) aguardarRetransmissoesFinais(idTransferencia, conclusao);
     }
 
 
 
-    private void baixar(Datagrama pedido) {
+    /**
+     * Mantém a transferência avulsa por mais um período de espera depois do ACK de conclusão.
+     * Se o ACK do último fragmento ou o ACK de conclusão se perder, o cliente repete o último
+     * DATA e o servidor reconfirma.
+     */
+    private void aguardarRetransmissoesFinais (int idTransferencia, Datagrama conclusao) {
+
+        while (true) {
+
+            Datagrama datagrama;
+
+            try { datagrama = receberDatagrama(TIMEOUT_MS); }
+
+            catch (IOException e) { return; }
+
+            if ( (datagrama.getComando() == Comando.DATA) && (datagrama.getIdTransferencia() == idTransferencia) ) {
+
+                enviarAck(idTransferencia, datagrama.getNumeroFragmento());
+
+                enviar(conclusao);
+            }
+        }
+    }
+
+
+
+    private void baixar (Datagrama pedido) throws IOException {
 
         String nome = pedido.getNome();
 
         if (nome == null || nome.isEmpty()) {
 
-            enviarErro(pedido, "3001", "Nome de arquivo nao informado");
+            enviarErro("3001", "Nome de arquivo nao informado");
 
             return;
         }
 
         int idTransferencia = SERVIDOR.novoIdTransferencia();
 
-        if (!GERENCIADOR.existe(nome)) {
+        if (!GERENCIADOR.existeArquivo(nome)) {
 
-            enviarErro(pedido, "3002", "Arquivo inexistente: " + nome);
+            enviarErro("3002", "Arquivo inexistente: " + nome);
 
-            registrarLog("DOWNLOAD", "ERRO", "Arquivo inexistente: " + nome);
+            RELATORIO.registrarDownload(origem(), "ERRO", "Arquivo inexistente: " + nome);
 
             return;
         }
 
-        byte[] conteudo = GERENCIADOR.lerArquivo(nome);
+        byte[] conteudo;
 
-        int totalFragmentos = (int) Math.ceil(conteudo.length / (double) TAMANHO_FRAGMENTO);
+        try { conteudo = GERENCIADOR.lerArquivo(nome); }
+
+        catch (IOException e) {
+
+            enviarErro("3003", "Falha ao ler o arquivo: " + nome);
+
+            RELATORIO.registrarDownload(origem(), "ERRO", "Falha ao ler " + nome + ": " + e.getMessage());
+
+            return;
+        }
+
+        int totalFragmentos = (conteudo.length + TAMANHO_FRAGMENTO - 1) / TAMANHO_FRAGMENTO;
 
         String hash = calcularHashSha256(conteudo);
 
-        // Envia metadados como UPLOAD (reutiliza o layout: nome, tamanho, nº fragmentos, hash).
-
-        Datagrama metadados = Datagrama.subir(nome, conteudo.length, totalFragmentos, hash)
+        // Envia metadados como UPLOAD (reutiliza o layout: nome, tamanho, nº fragmentos, hash, id da transferência).
+        metadadosDoDownload = Datagrama.subir(nome, conteudo.length, totalFragmentos, hash)
                 .comIdTransferencia(idTransferencia);
-        enviar(metadados);
 
-        Set<Integer> acksRecebidos = new HashSet<>();
+        enviar(metadadosDoDownload);
 
-        int indice = 0;
+        RELATORIO.registrarDownload(origem(), "INICIO", nome + " (" + conteudo.length + " bytes em " + totalFragmentos + " fragmentos, id=" + idTransferencia + ")");
 
-        while (indice < totalFragmentos) {
+        for (int indice = 0; indice < totalFragmentos; indice++) {
 
-            if (acksRecebidos.contains(indice)) {
-
-                indice++;
-
-                continue;
-            }
-
-            byte[] parte = extrairFragmento(conteudo, indice);
-
-            Datagrama data = Datagrama.dados(idTransferencia, indice, parte);
+            Datagrama data = Datagrama.dados(idTransferencia, indice, extrairFragmento(conteudo, indice));
 
             boolean confirmado = false;
 
-            int tentativa = 0;
-
-            while (tentativa < MAX_TENTATIVAS && !confirmado) {
+            for (int tentativa = 1; tentativa <= MAX_TENTATIVAS && !confirmado; tentativa++) {
 
                 enviar(data);
 
-                registrarLog("DOWNLOAD", "ENVIO", "Fragmento " + indice + "/" + (totalFragmentos - 1) + " (tentativa " + (tentativa + 1) + ")");
+                confirmado = aguardarAck(idTransferencia, indice);
 
-                Datagrama ack = aguardarAck(idTransferencia, indice);
+                if (!confirmado && tentativa < MAX_TENTATIVAS) {
 
-                if (ack != null) {
-
-                    acksRecebidos.add(indice);
-
-                    confirmado = true;
-                }
-
-                else {
-                    tentativa++;
-
-                    registrarLog("DOWNLOAD", "RETRANSMISSAO", "Fragmento " + indice + " sem ACK, reenviando (tentativa " + (tentativa + 1) + "/" + MAX_TENTATIVAS + ")");
-
-                    if (tentativa >= MAX_TENTATIVAS) {
-
-                        enviarErro(pedido, "4002", "Cliente nao confirmou ACKs; transferencia abortada no fragmento " + indice);
-
-                        registrarLog("DOWNLOAD", "ERRO", "Abortado apos " + MAX_TENTATIVAS + " tentativas no fragmento " + indice);
-
-                        return;
-                    }
+                    RELATORIO.registrarRetransmissao(origem(), indice, "sem ACK, reenviando (tentativa " + (tentativa + 1) + "/" + MAX_TENTATIVAS + ")");
                 }
             }
 
-            indice++;
+            if (!confirmado) {
+
+                enviarErro("4002", "Cliente nao confirmou ACKs; transferencia abortada no fragmento " + indice);
+
+                RELATORIO.registrarDownload(origem(), "ERRO", "Abortado apos " + MAX_TENTATIVAS + " tentativas no fragmento " + indice);
+
+                return;
+            }
         }
 
         // ACK final de conclusão.
+        enviar(Datagrama.ack(idTransferencia, -1));
 
-        Datagrama conclusao = Datagrama.ack(idTransferencia, -1);
-
-        enviar(conclusao);
-
-        registrarLog("DOWNLOAD", "OK", nome + " enviado (" + conteudo.length + " bytes em " + totalFragmentos + " fragmentos)");
+        RELATORIO.registrarDownload(origem(), "OK", nome + " enviado (" + conteudo.length + " bytes em " + totalFragmentos + " fragmentos)");
     }
 
 
 
-    private Datagrama aguardarAck(int transferencia, int fragmentoEsperado) {
+    /**
+     * Aguarda, por até TIMEOUT_MS, o ACK de um fragmento. Confirmações de outros fragmentos são
+     * ignoradas. Se o cliente repetir o DOWNLOAD, os metadados se perderam e são reenviados.
+     *
+     * @return {@code true} se o ACK esperado chegou; {@code false} se o tempo esgotou.
+     * @throws ClienteAbortouException se o cliente enviar ERROR.
+     */
+    private boolean aguardarAck (int idTransferencia, int fragmentoEsperado) throws IOException {
 
         long prazo = System.currentTimeMillis() + TIMEOUT_MS;
 
-        while (System.currentTimeMillis() < prazo) {
+        while (true) {
 
-            int restante = (int) (prazo - System.currentTimeMillis());
+            long restante = prazo - System.currentTimeMillis();
 
+            if (restante <= 0) return false;
 
-            try {
+            Datagrama datagrama;
 
-                Datagrama datagrama = receberDatagrama(Math.max(1, restante));
+            try { datagrama = receberDatagrama((int) restante); }
 
-                if (datagrama.getComando() == Comando.ACK &&
-                        datagrama.getIdTransferencia() == transferencia &&
-                        datagrama.getNumeroFragmento() == fragmentoEsperado) {
-                    return datagrama;
-                }
-            }
+            catch (SocketTimeoutException e) { return false; }
 
-            catch (SocketTimeoutException e) {
+            Comando comando = datagrama.getComando();
 
-                return null;
-            }
+            if ( (comando == Comando.ACK) && (datagrama.getIdTransferencia() == idTransferencia) && (datagrama.getNumeroFragmento() == fragmentoEsperado) ) return true;
 
-            catch (IOException e) {
+            if ( (comando == Comando.DOWNLOAD) && (metadadosDoDownload != null) ) enviar(metadadosDoDownload);
 
-                return null;
-            }
+            if (comando == Comando.ERROR) throw new ClienteAbortouException(datagrama.getMensagemErro());
         }
-
-        return null;
     }
 
 
 
-    private byte[] extrairFragmento(byte[] conteudo, int indice) {
+    private byte[] extrairFragmento (byte[] conteudo, int indice) {
 
         int inicio = indice * TAMANHO_FRAGMENTO;
 
@@ -435,7 +494,7 @@ public class ClienteHandler implements Runnable {
 
 
 
-    private byte[] remontar(Map<Integer, byte[]> fragmentos, int totalFragmentos, long tamanhoEsperado) {
+    private byte[] remontar (Map<Integer, byte[]> fragmentos, int totalFragmentos, long tamanhoEsperado) {
 
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
 
@@ -457,7 +516,7 @@ public class ClienteHandler implements Runnable {
 
 
 
-    private String calcularHashSha256(byte[] dados) {
+    private String calcularHashSha256 (byte[] dados) {
 
         try {
 
@@ -480,81 +539,87 @@ public class ClienteHandler implements Runnable {
 
 
 
-    private void enviarAck(int idTransferencia, int numeroFragmento) {
+    private void enviarAck (int idTransferencia, int numeroFragmento) {
 
-        Datagrama ack = Datagrama.ack(idTransferencia, numeroFragmento);
-
-        enviar(ack);
+        enviar(Datagrama.ack(idTransferencia, numeroFragmento));
     }
 
 
 
-    private void enviarErro(Datagrama origem, String codigo, String mensagem) {
+    private void enviarErro (String codigo, String mensagem) {
 
         int codigoInt;
 
         try { codigoInt = Integer.parseInt(codigo); } catch (NumberFormatException e) { codigoInt = 0; }
 
-        Datagrama erro = Datagrama.erro(codigoInt, mensagem);
-
-        enviar(erro);
+        enviar(Datagrama.erro(codigoInt, mensagem));
     }
 
 
 
-    private void enviar(Datagrama datagrama) {
+    private void enviar (Datagrama datagrama) {
 
-        try {
-
-            byte[] bytes = datagrama.serialize();
-
-            DatagramPacket pacote = new DatagramPacket(bytes, bytes.length, ENDERECO_DO_CLIENTE, PORTA_DO_CLIENTE);
-
-            FANTOCHE.send(pacote);
-        }
+        try { PROTOCOLO.enviar(datagrama, ENDERECO_DO_CLIENTE); }
 
         catch (IOException e) {
 
-            registrarLog("ENVIO", "ERRO", "Falha ao enviar datagrama: " + e.getMessage());
+            RELATORIO.registrarErro(origem(), "Falha ao enviar " + datagrama.getComando() + ": " + e.getMessage());
         }
     }
 
 
 
-    private Datagrama receberDatagrama(int timeoutMs) throws IOException {
+    /**
+     * Espera o próximo datagrama entregue pelo Servidor.
+     *
+     * @throws SocketTimeoutException se nenhum datagrama chegar em {@code timeoutMs}.
+     */
+    private Datagrama receberDatagrama (int timeoutMs) throws IOException {
 
-        FANTOCHE.setSoTimeout(timeoutMs);
+        try {
 
-        byte[] buffer = new byte[65535];
+            Datagrama datagrama = FILA.poll(Math.max(1, timeoutMs), TimeUnit.MILLISECONDS);
 
-        DatagramPacket pacote = new DatagramPacket(buffer, buffer.length);
+            if (datagrama == null) throw new SocketTimeoutException("Nenhum datagrama em " + timeoutMs + " ms");
 
-        FANTOCHE.receive(pacote);
+            return datagrama;
+        }
 
-        byte[] dados = Arrays.copyOf(pacote.getData(), pacote.getLength());
+        catch (InterruptedException e) {
 
-        return Datagrama.parse(dados);
+            Thread.currentThread().interrupt();
+
+            throw new IOException("Atendimento interrompido", e);
+        }
     }
 
 
 
-    private void registrarLog(String operacao, String status, String detalhes) {
+    private String origem () {
 
-        String origem = ENDERECO_DO_CLIENTE.getHostAddress() + ":" + PORTA_DO_CLIENTE;
-
-        RELATORIO.registrar(origem, operacao, status, detalhes);
+        return ENDERECO_DO_CLIENTE.getAddress().getHostAddress() + ":" + ENDERECO_DO_CLIENTE.getPort();
     }
 
 
 
-    public void encerrar() {
+    public void encerrar () {
 
         if (!ativo) return;
 
         ativo = false;
 
-        registrarLog("CONEXAO", "OK", "Cliente " + ID_CLIENTE + " encerrado");
+        if (!TRANSFERENCIA_UNICA) RELATORIO.registrarConexao(origem(), "Cliente " + ID_CLIENTE + " encerrado");
 
-        if (FANTOCHE != null && !FANTOCHE.isClosed()) FANTOCHE.close();
+        SERVIDOR.removerAtendimento(ENDERECO_DO_CLIENTE, this);
+    }
+
+
+
+    /** O cliente enviou ERROR durante uma operação: ela termina sem nova resposta ao cliente. */
+    private static final class ClienteAbortouException extends IOException {
+
+        private static final long serialVersionUID = 1L;
+
+        ClienteAbortouException (String mensagem) { super(mensagem); }
     }
 }

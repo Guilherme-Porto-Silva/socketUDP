@@ -31,6 +31,9 @@ import java.util.regex.Pattern;
  *               tamanhoArquivo (long 8 bytes)
  *               numeroFragmentos (int 4 bytes)
  *               hash (String)
+ *               idTransferencia (int 4 bytes)
+ *               - UPLOAD enviado pelo cliente: idTransferencia = 0 (o servidor atribui o id no ACK)
+ *               - UPLOAD enviado pelo servidor como metadados de um DOWNLOAD: idTransferencia = id da transferência
  * DATA        : idTransferencia (int 4 bytes)
  *               numeroFragmento (int 4 bytes)
  *               comprimentoPayload (int 4 bytes)
@@ -42,6 +45,7 @@ import java.util.regex.Pattern;
  *               - ACK de COMANDO:  idTransferencia = 0, numeroFragmento = 0
  *               - ACK de UPLOAD :  idTransferencia = id atribuído, numeroFragmento = 0
  *               - ACK de DATA   :  idTransferencia = id da transferência, numeroFragmento = fragmento confirmado
+ *               - ACK de conclusão: idTransferencia = id da transferência, numeroFragmento = -1
  * ERROR       : codigoErro (int 4 bytes)
  *               mensagem (String)
  * A lista de arquivos (LIST e UPDATE_LIST) é uma String UTF-8 em que cada
@@ -157,6 +161,8 @@ public final class Datagrama {
 
                     escreverString(out, hash);
 
+                    out.writeInt(idTransferencia);
+
                     break;
 
                 case DATA:
@@ -255,6 +261,8 @@ public final class Datagrama {
 
                     datagrama.hash = lerString(in);
 
+                    datagrama.idTransferencia = in.readInt();
+
                     break;
 
                 case DATA:
@@ -330,7 +338,8 @@ public final class Datagrama {
 
     /**
      * Define o idTransferencia em datagramas já construídos (ex.: UPLOAD usado
-     * como metadados de download). Retorna {@code this} para encadeamento.
+     * como metadados de download; o campo é serializado no UPLOAD).
+     * Retorna {@code this} para encadeamento.
      */
     public Datagrama comIdTransferencia (int idDaTransferencia) {
 
@@ -435,7 +444,7 @@ public final class Datagrama {
 
     public static Datagrama ack (int idTransferencia, int numeroFragmento) {
 
-        if (idTransferencia < 0 || numeroFragmento < 0) throw new IllegalArgumentException("idTransferencia e numeroFragmento devem ser >= 0");
+        if (idTransferencia < 0 || numeroFragmento < -1) throw new IllegalArgumentException("ACK exige idTransferencia >= 0 e numeroFragmento >= -1 (-1 indica conclusão)");
 
         Datagrama datagrama = new Datagrama(Comando.ACK);
 
@@ -483,11 +492,11 @@ public final class Datagrama {
 
     public String getStatus() { return status; }
 
-    public void setStatus(String status) { status = status; }
+    public void setStatus(String status) { this.status = status; }
 
     public String getNomeFinal() { return nomeFinal; }
 
-    public void setNomeFinal(String nomeFinal) { nomeFinal = nomeFinal; }
+    public void setNomeFinal(String nomeFinal) { this.nomeFinal = nomeFinal; }
 
     public String getListaArquivos () { return listaArquivos; }
 
@@ -631,6 +640,8 @@ public final class Datagrama {
                 if (numeroFragmentos < 0) throw new IllegalArgumentException("numeroFragmentos não pode ser negativo");
                 
                 if (hash == null || !PADRAO_HASH_SHA256.matcher(hash).matches()) throw new IllegalArgumentException("UPLOAD exige hash SHA-256 em hexadecimal de 64 caracteres");
+
+                if (idTransferencia < 0) throw new IllegalArgumentException("UPLOAD exige idTransferencia >= 0");
                 
                 break;
                 
@@ -662,7 +673,7 @@ public final class Datagrama {
 
                 if (idTransferencia < 0) throw new IllegalArgumentException("ACK exige um id de transferência maior ou igual a 0");
 
-                if (mensagemErro == null) throw new IllegalArgumentException("ACK exige mensagem não nula.");
+                if (numeroFragmento < -1) throw new IllegalArgumentException("ACK exige numeroFragmento maior ou igual a -1");
 
                 break;
 

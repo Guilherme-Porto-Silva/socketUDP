@@ -3,6 +3,7 @@ package cliente.interfaceGrafica;
 import javax.swing.*;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -11,6 +12,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * cancelamento) vale uma única vez: eventos posteriores são ignorados.
  */
 public class MonitorDaTransferencia implements Monitor {
+
+    /** Recebe o resultado final da transferência na EDT; a interface implementa. */
+    @FunctionalInterface
+    interface Finalizador {
+
+        void concluir (MonitorDaTransferencia monitor, boolean sucesso, String mensagem);
+    }
+
+    private final Finalizador FINALIZADOR;
 
     private final AtomicBoolean ENCERRADA = new AtomicBoolean(false);
 
@@ -23,6 +33,14 @@ public class MonitorDaTransferencia implements Monitor {
     volatile double fracao = -1;
 
     volatile String status = "";
+
+    /**
+     * @param finalizador chamado na EDT, uma única vez, com o resultado final da transferência
+     */
+    MonitorDaTransferencia (Finalizador finalizador) {
+
+        FINALIZADOR = Objects.requireNonNull(finalizador, "finalizador não pode ser nulo");
+    }
 
     @Override public void onProgresso (double valor) { if (!ENCERRADA.get()) fracao = valor; }
 
@@ -87,14 +105,11 @@ public class MonitorDaTransferencia implements Monitor {
 
         fecharRecursos();
 
-        SwingUtilities.invokeLater(() -> finalizarTransferencia(this, sucesso, mensagem));
+        SwingUtilities.invokeLater(() -> FINALIZADOR.concluir(this, sucesso, mensagem));
     }
 
 
 
-    private void finalizarTransferencia (MonitorDaTransferencia monitorDaTransferencia, boolean sucesso, String mensagem) {
-
-    }
 
 
     private void fecharRecursos () {

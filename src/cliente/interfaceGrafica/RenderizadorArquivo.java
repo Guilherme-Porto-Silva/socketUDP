@@ -25,9 +25,9 @@ public final class RenderizadorArquivo extends JPanel implements ListCellRendere
 
     RenderizadorArquivo (Color texto, Color foreground) {
 
-        COR_TEXTO = texto;
-
         super(new BorderLayout(12, 0));
+
+        COR_TEXTO = texto;
 
         setBorder(BorderFactory.createEmptyBorder(0, 12, 0, 12));
 

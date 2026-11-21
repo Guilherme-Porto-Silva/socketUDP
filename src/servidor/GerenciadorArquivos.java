@@ -256,8 +256,40 @@ public class GerenciadorArquivos {
 
 
 
-    public boolean existe (String nome) {
+    /**
+     * Lê o conteúdo completo de um arquivo da pasta central.
+     *
+     * @param nome nome do arquivo desejado.
+     * @return bytes do arquivo.
+     * @throws FileNotFoundException se o arquivo não existir ou não for um arquivo regular.
+     * @throws IOException           se houver erro de leitura.
+     */
+    public byte[] lerArquivo (String nome) throws IOException {
 
-        return false;
+        return Files.readAllBytes(abrirParaBaixar(nome));
+    }
+
+
+
+    /**
+     * Lista os arquivos no formato do protocolo (ver comum.Datagrama): um item
+     * "nome;tamanho" por arquivo, com o tamanho em bytes.
+     * Um arquivo removido entre a listagem e a consulta do tamanho sai da lista.
+     *
+     * @return itens "nome;tamanho" em ordem alfabética.
+     * @throws IOException se a pasta central não puder ser lida.
+     */
+    public List<String> listarArquivosComTamanho () throws IOException {
+
+        List<String> itens = new ArrayList<>();
+
+        for (String nome : listarArquivos()) {
+
+            try { itens.add(nome + ";" + obterTamanhoArquivo(nome)); }
+
+            catch (IOException e) { /* removido durante a consulta: fora da lista */ }
+        }
+
+        return itens;
     }
 }

@@ -8,9 +8,7 @@ import javax.swing.SwingUtilities;
 import java.net.InetSocketAddress;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -47,8 +45,11 @@ public class Cliente {
     /** Referência para a interface gráfica, usada apenas por callbacks na EDT. */
     private final InterfaceGrafica INTERFACE;
 
-    /** Camada de transporte confiável sobre UDP. */
+    /** Camada de transporte UDP do cliente (socket principal, em porta efêmera). */
     private ProtocoloUDP PROTOCOLO;
+
+    /** Endereço resolvido do servidor (IP + porta), destino de REGISTER e LIST. */
+    private volatile InetSocketAddress SERVIDOR;
 
     /** Indica se o cliente ainda está ativo e conectado ao fluxo do servidor. */
     private final AtomicBoolean ATIVO = new AtomicBoolean(false);
@@ -72,27 +73,28 @@ public class Cliente {
      * @param interfaceGrafica interface gráfica que apresentará mensagens e a lista de arquivos
      */
     public Cliente(String endereco, int porta, InterfaceGrafica interfaceGrafica) {
-        
+
         ENDERECO_DO_SERVIDOR = endereco;
-        
+
         PORTA_DO_SERVIDOR = porta;
-        
+
         INTERFACE = interfaceGrafica;
-        
+
         ID_CLIENTE = "cliente-" + UUID.randomUUID();// um trem que eu vi no curso de Spring Security da Alura
     }
 
 
 
     /**
-     * Inicia a conexão UDP, ATIVO o cliente e dispara o registro em segundo plano.
+     * Abre o socket UDP do cliente (porta efêmera), ATIVO o cliente e dispara o registro em segundo plano.
      * Este método é chamado pela thread de eventos da interface ou pelo main,
      * mas nunca bloqueia a EDT.
      */
     public void iniciar () {
 
         try {
-            PROTOCOLO = new ProtocoloUDP(ENDERECO_DO_SERVIDOR, PORTA_DO_SERVIDOR);
+
+            PROTOCOLO = new ProtocoloUDP();
 
             ATIVO.set(true);
 
@@ -118,21 +120,29 @@ public class Cliente {
 
     /**
      * Envia o REGISTER em uma thread própria, sem travar a interface.
-     * Aguarda ACK dentro do timeout; se não houver resposta, avisa a interface
-     * que o servidor está indisponível. Em caso de sucesso, inicia a escuta e o LIST.
+     * Resolve o endereço do servidor e aguarda ACK dentro do timeout; se não houver resposta,
+     * avisa a interface que o servidor está indisponível. Em caso de sucesso, inicia a escuta e o LIST.
      */
     private void registrarEmSegundoPlano () {
 
         Thread threadRegistro = new Thread(() -> {
 
             try {
-                Map<String, String> campos = new HashMap<>();
 
-                campos.put("id", ID_CLIENTE);
+                InetSocketAddress servidor = new InetSocketAddress(ENDERECO_DO_SERVIDOR, PORTA_DO_SERVIDOR);
+
+                if (servidor.isUnresolved()) {
+
+                    notificarServidorIndisponivel("Endereço do servidor inválido: " + ENDERECO_DO_SERVIDOR);
+
+                    return;
+                }
+
+                SERVIDOR = servidor;
 
                 Datagrama registro = Datagrama.registrar(ID_CLIENTE);
 
-                PROTOCOLO.enviar(registro, new InetSocketAddress(PORTA_DO_SERVIDOR));
+                PROTOCOLO.enviar(registro, SERVIDOR);
 
                 Datagrama resposta = PROTOCOLO.receber(TIMEOUT_REGISTRO_MS).datagrama();
 
@@ -154,13 +164,13 @@ public class Cliente {
                 }
 
                 else notificarServidorIndisponivel("Não houve resposta do servidor ao REGISTER (timeout).");
-
             }
 
             catch (Exception e) {
 
                 notificarServidorIndisponivel("Falha de comunicação com o servidor: " + e.getMessage());
             }
+
         }, "cliente-registro");
 
         threadRegistro.setDaemon(true);
@@ -196,6 +206,7 @@ public class Cliente {
         while (ATIVO.get()) {
 
             try {
+
                 Datagrama datagrama = PROTOCOLO.receber(INTERVALO_ESCUTA_MS).datagrama();
 
                 if (datagrama == null) continue;
@@ -212,7 +223,6 @@ public class Cliente {
                 else if ( (datagrama.getComando() == Comando.ACK) && (datagrama.getCampo("lista") != null) ) {
 
                     // Alguns servidores respondem ao LIST com ACK contendo a lista.
-
                     List<String> lista = extrairLista(datagrama);
 
                     SwingUtilities.invokeLater(() -> INTERFACE.atualizarLista(lista));
@@ -230,7 +240,12 @@ public class Cliente {
 
             catch (Exception e) {
 
-                if (ATIVO.get()) notificarServidorIndisponivel("Falha na escuta do servidor: " + e.getMessage());
+                if (!ATIVO.get()) break;
+
+                // Datagrama malformado (ProtocoloUDP o sinaliza com IllegalArgumentException como causa): ignorado.
+                if (e.getCause() instanceof IllegalArgumentException) continue;
+
+                notificarServidorIndisponivel("Falha na escuta do servidor: " + e.getMessage());
 
                 break;
             }
@@ -248,20 +263,29 @@ public class Cliente {
         Thread threadListar = new Thread(() -> {
 
             try {
-                Map<String, String> campos = new HashMap<>();
 
-                campos.put("id", ID_CLIENTE);
-
-                Datagrama pedidoLista = Datagrama.listar();
-
-                PROTOCOLO.enviar(pedidoLista, new InetSocketAddress(PORTA_DO_SERVIDOR));
-
+                // A marca é zerada antes do envio: uma resposta rápida não pode ser apagada depois.
                 synchronized (LISTA_DE_BLOQUEADOS) { listaRecebida = false; }
 
-                synchronized (LISTA_DE_BLOQUEADOS) { LISTA_DE_BLOQUEADOS.wait(TIMEOUT_LISTA_MS); }
+                PROTOCOLO.enviar(Datagrama.listar(), SERVIDOR);
 
-                if (!listaRecebida) notificarServidorIndisponivel("Não houve resposta do servidor ao LIST (timeout).");
+                long prazo = System.currentTimeMillis() + TIMEOUT_LISTA_MS;
 
+                synchronized (LISTA_DE_BLOQUEADOS) {
+
+                    while (!listaRecebida) {
+
+                        long restante = prazo - System.currentTimeMillis();
+
+                        if (restante <= 0) break;
+
+                        LISTA_DE_BLOQUEADOS.wait(restante);
+                    }
+
+                    if (listaRecebida) return;
+                }
+
+                notificarServidorIndisponivel("Não houve resposta do servidor ao LIST (timeout).");
             }
 
             catch (InterruptedException e) {
@@ -273,6 +297,7 @@ public class Cliente {
 
                 notificarServidorIndisponivel("Falha ao solicitar a lista de arquivos: " + e.getMessage());
             }
+
         }, "cliente-listar");
 
         threadListar.setDaemon(true);
@@ -299,10 +324,11 @@ public class Cliente {
 
     /**
      * Extrai a lista de arquivos dos campos do datagrama.
-     * Aceita separadores por quebra de linha ou ponto-e-vírgula.
+     * Cada linha é um item no formato "nome;tamanho" (ver comum.Datagrama); a interface
+     * interpreta o tamanho. Itens apenas com o nome também são aceitos.
      *
      * @param datagrama datagrama recebido do servidor
-     * @return lista imutável de nomes de arquivos
+     * @return lista imutável com um item por linha
      */
     private List<String> extrairLista (Datagrama datagrama) {
 
@@ -310,7 +336,7 @@ public class Cliente {
 
         if (bruto == null || bruto.isBlank()) return Collections.emptyList();
 
-        return Arrays.asList(bruto.split("\\r?\\n|;"));
+        return Arrays.asList(bruto.split("\\r?\\n"));
     }
 
 
@@ -327,6 +353,7 @@ public class Cliente {
         if (PROTOCOLO != null) {
 
             try {
+
                 PROTOCOLO.fechar();
             }
 
@@ -367,10 +394,12 @@ public class Cliente {
         if (PROTOCOLO != null) {
 
             try {
+
                 PROTOCOLO.fechar();
             }
 
             catch (Exception e) {
+
                 // Ignora erros de encerramento.
             }
         }
@@ -389,11 +418,27 @@ public class Cliente {
 
         final String servidor = args.length > 0? args[0] : "localhost";
 
-        final int porta = args.length > 1? Integer.parseInt(args[1]) : 5000;
+        int portaLida = 5000;
+
+        if (args.length > 1) {
+
+            try { portaLida = Integer.parseInt(args[1]); }
+
+            catch (NumberFormatException e) {
+
+                System.err.println("Porta inválida: " + args[1] + ". Uso: java cliente.Cliente [servidor] [porta]");
+
+                System.exit(1);
+            }
+        }
+
+        final int porta = portaLida;
 
         SwingUtilities.invokeLater(() -> {
 
             InterfaceGrafica janela = new InterfaceGrafica();
+
+            janela.definirServidor(servidor, porta);
 
             Cliente cliente = new Cliente(servidor, porta, janela);
 
